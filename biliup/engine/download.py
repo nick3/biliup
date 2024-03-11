@@ -8,12 +8,13 @@ from typing import Generator, List
 from urllib.parse import urlparse
 
 import requests
+
+from biliup.database.db import add_stream_info, SessionLocal, update_cover_path, update_room_title, update_file_list
 from biliup.plugins import random_user_agent
 import stream_gears
 from PIL import Image
 
 from biliup.config import config
-from biliup.database import DB as db
 
 logger = logging.getLogger('biliup')
 
@@ -29,7 +30,10 @@ class DownloadBase:
         self.fname = fname
         self.url = url
         # 录制后保存文件格式而非源流格式 对应原配置文件format 仅ffmpeg及streamlink生效
-        self.suffix = suffix
+        if not suffix:
+            logger.error(f'检测到suffix不存在，请补充后缀')
+        else:
+            self.suffix = suffix.lower()
         self.title = None
         self.live_cover_path = None
         self.database_row_id = 0
@@ -181,8 +185,9 @@ class DownloadBase:
             return False
         file_name = self.file_name
         # 将文件名和直播标题存储到数据库
-        db.update_file_list(self.database_row_id, file_name)
-        db.update_room_title(self.database_row_id, self.room_title)
+        with SessionLocal() as db:
+            update_file_list(db, self.database_row_id, file_name)
+            update_room_title(db, self.database_row_id, self.room_title)
         retval = self.download(file_name)
         self.rename(f'{file_name}.{self.suffix}')
         return retval
@@ -204,7 +209,8 @@ class DownloadBase:
             'url': self.url,
             'date': date,
         }
-        self.database_row_id = db.add_stream_info(**stream_info)  # 返回数据库中此行记录的 id
+        with SessionLocal() as db:
+            self.database_row_id = add_stream_info(db, **stream_info)  # 返回数据库中此行记录的 id
 
         while True:
             ret = False
@@ -260,7 +266,8 @@ class DownloadBase:
             end_time = time.localtime()
         self.download_cover(time.strftime(self.get_filename().encode("unicode-escape").decode(), date).encode().decode("unicode-escape"))
         # 更新数据库中封面存储路径
-        db.update_cover_path(self.database_row_id, self.live_cover_path)
+        with SessionLocal() as db:
+            update_cover_path(db, self.database_row_id, self.live_cover_path)
         logger.info(f'退出下载：{self.__class__.__name__} - {self.fname}')
         stream_info = {
             'name': self.fname,

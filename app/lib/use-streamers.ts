@@ -26,28 +26,34 @@ export function useBiliUsers() {
   const {data, error, isLoading} = useSWR<User[]>("/v1/users", fetcher);
   const [list, setList] = useState<any[]>([]);
   useEffect(() => {
-    if (data?.length === 0) {
-      setList([]);
+    if (!data || data.length === 0) {
+      return;
     }
-    data?.forEach(item => {
-      (async () => {
-        const res = await fetcher(`/bili/space/myinfo?user=${item.value}`, undefined)
-        const pRes = await proxy(`/bili/proxy?url=${res.data.face}`)
-        const myBlob = await pRes.blob()
-        const newList = data.map(value => {
-          if (value.id === item.id) {
-            return {
-              ...value,
-              name: res.data.name,
-              face: URL.createObjectURL(myBlob),
-            };
-          }
-          return value;
-        });
-        setList(newList);
-      })()
-    })
-  }, [data]);
+    const updateList = async (item: User) => {
+      try {
+        const res = await fetcher(`/bili/space/myinfo?user=${item.value}`, undefined);
+        const pRes = await proxy(`/bili/proxy?url=${res.data.face}`);
+        const myBlob = await pRes.blob();
+
+        return {
+          ...item,
+          name: res.data.name,
+          face: URL.createObjectURL(myBlob),
+        };
+      } catch (error) {
+        console.error(error);
+        const pRes = await proxy("/bili/proxy?url=https://i0.hdslb.com/bfs/face/member/noface.jpg");
+        const myBlob = await pRes.blob();
+        return {
+          ...item,
+          name: "Cookie已失效",
+          face: URL.createObjectURL(myBlob),
+        };
+      }
+    };
+    Promise.all(data.map(updateList)).then(setList);
+  }, [data])
+
   return {
     isLoading,
     isError: error,

@@ -1,4 +1,4 @@
-'use client'
+"use client";
 import {
     Layout,
     Nav,
@@ -11,8 +11,16 @@ import {
     Form,
     Row,
     Col,
-    Dropdown, SplitButtonGroup, Typography, Popconfirm
-} from '@douyinfe/semi-ui';
+    Dropdown,
+    SplitButtonGroup,
+    Typography,
+    Popconfirm,
+    List,
+    Descriptions,
+    Rating,
+    ButtonGroup,
+} from "@douyinfe/semi-ui";
+
 import {
     IconBell,
     IconHelpCircle,
@@ -26,15 +34,19 @@ import {
     IconVideoListStroked,
     IconTreeTriangleDown,
     IconSendStroked,
-    IconEdit2Stroked, IconDeleteStroked
-} from '@douyinfe/semi-icons';
-import { List, Descriptions, Rating, ButtonGroup } from '@douyinfe/semi-ui';
+    IconEdit2Stroked,
+    IconDeleteStroked,
+} from "@douyinfe/semi-icons";
 import { useState } from "react";
-import useStreamers from './lib/use-streamers';
-import TemplateModal from './ui/TemplateModal';
-import {DropDownMenuItem} from "@douyinfe/semi-ui/lib/es/dropdown";
-import {LiveStreamerEntity} from "./lib/api-streamer";
+import useStreamers from "./lib/use-streamers";
+import TemplateModal from "./ui/TemplateModal";
+import { DropDownMenuItem } from "@douyinfe/semi-ui/lib/es/dropdown";
+import { LiveStreamerEntity } from "./lib/api-streamer";
 
-export default function Home() {
-   return (<>hello</>);
-}
+const Home: React.FC = () => (
+    <iframe style={{
+        borderWidth: 0
+    }} height="100%" src='https://biliup.github.io/biliup/docs/guide/changelog/'></iframe>
+);
+
+export default Home;

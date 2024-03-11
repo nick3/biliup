@@ -12,8 +12,7 @@ from pathlib import Path
 import biliup.common.reload
 from biliup.common.timer import Timer
 from biliup.config import config
-from biliup.database import DB as db
-from biliup.database.models import LiveStreamers, UploadStreamers
+from biliup.database.db import SessionLocal, init
 from . import __version__, LOG_CONF
 from .common.Daemon import Daemon
 from .common.reload import AutoReload
@@ -31,6 +30,7 @@ def arg_parser():
     parser.add_argument('-v', '--verbose', action="store_const", const=logging.DEBUG, help="Increase output verbosity")
     parser.add_argument('--config', type=argparse.FileType(mode='rb'),
                         help='Location of the configuration file (default "./config.yaml")')
+    parser.add_argument('--no-access-log', action='store_true', help='disable web access log')
     subparsers = parser.add_subparsers(help='Windows does not support this sub-command.')
     # create the parser for the "start" command
     parser_start = subparsers.add_parser('start', help='Run as a daemon process.')
@@ -43,13 +43,15 @@ def arg_parser():
     args = parser.parse_args()
     biliup.common.reload.program_args = args.__dict__
     # 初始化数据库
-    if db.init():
-        try:
-            config.load(args.config)
-            config.save_to_db()
-        except FileNotFoundError:
-            print(f'新版本不依赖配置文件,请访问 http://ip:{args.port} 修改配置')
-    config.load_from_db()
+    with SessionLocal() as db:
+        if init(args.no_http):
+            try:
+                config.load(args.config)
+                config.save_to_db(db)
+            except FileNotFoundError:
+                print(f'新版本不依赖配置文件,请访问 WebUI 修改配置')
+        config.load_from_db(db)
+    # db.remove()
     LOG_CONF.update(config.get('LOGGING', {}))
     if args.verbose:
         LOG_CONF['loggers']['biliup']['level'] = args.verbose
@@ -63,7 +65,6 @@ def arg_parser():
 async def main(args):
     from .app import event_manager, context
     from biliup.downloader import check_flag
-    import biliup.web
 
     event_manager.start()
     wait = max(config.get('event_loop_interval', 40) - 3, 3)
@@ -73,10 +74,17 @@ async def main(args):
 
     interval = config.get('check_sourcecode', 15)
 
-    runner, site = await biliup.web.service(args)
-    detector = AutoReload(event_manager, runner.cleanup, check_flag.set, interval=interval)
-    biliup.common.reload.global_reloader = detector
-    await asyncio.gather(detector.astart(), site.start())
+    if not args.no_http:
+        import biliup.web
+        runner = await biliup.web.service(args)
+        detector = AutoReload(event_manager, runner.cleanup, check_flag.set, interval=interval)
+        biliup.common.reload.global_reloader = detector
+        await detector.astart()
+    else:
+        import biliup.common.reload
+        detector = AutoReload(event_manager, check_flag.set, interval=interval)
+        biliup.common.reload.global_reloader = detector
+        await asyncio.gather(detector.astart())
 
 
 if __name__ == '__main__':
