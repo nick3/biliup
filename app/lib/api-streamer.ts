@@ -2,9 +2,7 @@
 // The extra argument will be passed via the `arg` property of the 2nd parameter.
 // In the example below, `arg` will be `'my_token'`
 export async function sendRequest<T>(url: string, { arg }: {arg: T}) {
-  console.log(JSON.stringify(arg));
-  
-  const res =  await fetch(process.env.NEXT_PUBLIC_API_SERVER + url, {
+  const res =  await fetch((process.env.NEXT_PUBLIC_API_SERVER ?? '') + url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -38,7 +36,7 @@ export const proxy = async (input: RequestInfo | URL, init?: RequestInit | undef
 }
 
 export async function requestDelete<T>(url: string, { arg }: {arg: T}) {
-	const res =  await fetch(`${process.env.NEXT_PUBLIC_API_SERVER}${url}/${arg}`, {
+	const res =  await fetch(`${process.env.NEXT_PUBLIC_API_SERVER ?? ''}${url}/${arg}`, {
 		method: 'DELETE',
 	})
 	if (!res.ok) {
@@ -48,7 +46,7 @@ export async function requestDelete<T>(url: string, { arg }: {arg: T}) {
 }
 
 export async function put<T>(url: string, { arg }: {arg: T}) {
-	const res =  await fetch(`${process.env.NEXT_PUBLIC_API_SERVER}${url}`, {
+	const res =  await fetch(`${process.env.NEXT_PUBLIC_API_SERVER ?? ''}${url}`, {
 		method: 'PUT',
 		headers: {
         'Content-Type': 'application/json'
@@ -71,9 +69,9 @@ export interface StudioEntity {
 	template_name: string;
 	user_cookie: string;
 	copyright: number;
-	source: string;
+	copyright_source: string;
 	tid: number;
-	cover: string;
+	cover_path: string;
 	title: string;
 	description: string;
 	dynamic: string;
@@ -90,6 +88,7 @@ export interface StudioEntity {
 	open_elec: number;
 	credits: Credit[];
 	uploader: string;
+	extra_fields?: string;
 }
 
 export interface LiveStreamerEntity {
@@ -102,10 +101,14 @@ export interface LiveStreamerEntity {
 	upload_id?: number;
 	status?: string | React.ReactNode;
 	format?: string;
+    time_range?: string | Date[];
+    excluded_keywords?: string[];
 	preprocessor?: Record<'run', string>[];
+	segment_processor?: Record<'run', string>[];
 	downloaded_processor?: Record<'run', string>[];
 	postprocessor?: (Record<'run' | 'mv', string> | 'rm')[];
 	opt_args?: string[];
+	override?: Record<string, any>;
 }
 
 export interface BiliType {
@@ -127,13 +130,4 @@ export interface FileList {
 	name: string;
 	updateTime: number;
 	size: number;
-}
-export function getStreamers() {
-
-}
-
-export async function addTemplate(url: string, {arg}: any) {
-  console.log(url, arg);
-  
-  sendRequest('/v1/upload/streamers', {arg})
 }

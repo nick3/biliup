@@ -58,7 +58,8 @@ def check_access(
     header_value: str,
     strategy: Callable = lambda x: x
 ) -> bool:
-    log.debug('Check access: %r', header_value)
+    # log.debug('Check access: %r', header_value)
+    print('Check access: %r', header_value)
 
     try:
         login, password = parse_header(header_value)
@@ -71,6 +72,7 @@ def check_access(
     if hashed_password != hashed_request_password:
         return False
 
+    # log.debug('%r log in successed', "biliup")
     return True
 
 

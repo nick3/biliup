@@ -6,24 +6,27 @@
 ### 2.ffmpeg（纯ffmpeg下载），请手动安装ffmpeg。
 ### 3.stream-gears
 #downloader: ffmpeg
-### 录像单文件大小限制，单位Byte，超过此大小分段下载
+### 录像单文件大小限制，单位Byte，超过此大小分段下载，下载回放时无法使用
 file_size: 2621440000
 ### 录像单文件时间限制，格式'00:00:00'（时分秒），超过此大小分段下载，如需使用大小分段请注释此字段
-#segment_time: '00:50:00'
+#segment_time: '01:00:00'
 ### 小于此大小的视频文件将会被过滤删除，单位MB
 filtering_threshold: 20
 ### 自定义录播文件名模板, 支持变量 {streamer}:你在配置里设置的直播间名 %Y-%m-%d %H_%M_%S:创建文件的时间, {title}:当场直播间标题
 ### 如果上传文件，文件名必须包含设定的模板名。其次，如果没有定义时间，文件分片可能会互相覆盖，所以推荐设置时间来避免分段文件名重复。
 #filename_prefix: '{streamer}%Y-%m-%d %H_%M_%S{title}'
+### 视频分段后处理并行
+### 开启后无法保证分段后处理先后执行顺序
+#segment_processor_parallel: false
 
 #------上传------#
 ### 选择全局默认上传插件，Noop为不上传，但会执行后处理,可选bili_web，biliup-rs(默认值)
 #uploader: Noop
 ### b站提交接口，默认自动选择，可选web，client
 #submit_api: client
-### b站上传线路选择，默认为自动模式，目前可手动切换为bda2, kodo, ws, qn, cos, cos-internal(支持腾讯云内网免流+提速)
+### b站上传线路选择，默认自动选择最优线路。目前可手动切换为alia（海外）, bda2（大陆）, bldsa（大陆）, qn（全球）, tx（大陆）, txa（海外）
 lines: AUTO
-### 单文件并发上传数，未达到带宽上限时增大此值可提高上传速度
+### 单文件并发上传数,未达到带宽上限时,增大此值可提高上传速度(不要设置过大,部分线路限制为8,如速度不佳优先调整上传线路)
 threads: 3
 
 #------杂项------#
@@ -34,10 +37,9 @@ delay: 300
 event_loop_interval: 30
 ### 单个主播检测间隔时间，单位：秒。比如虎牙有10个主播，每个主播会间隔10秒检测
 checker_sleep: 10
-### 线程池1大小，负责下载事件。每个下载都会占用1。应该设置为比主播数量要多一点的数。
+### 线程池1大小，负责下载事件。应设置为比主播数量略大，如不确定请设置为999。
 pool1_size: 3
-### 线程池2大小，负责上传事件。每个上传都会占用1。
-### 应该设置为比主播数量要多一点的数，如果开启uploading_record需要设置的更多。
+### 线程池2大小，负责上传事件。应设置为比主播数量略大，如不确定请设置为999。
 pool2_size: 3
 ### 检测源码文件变化间隔，单位：秒，检测源码到变化后，程序会在空闲时自动重启
 check_sourcecode: 15
@@ -51,8 +53,8 @@ check_sourcecode: 15
 #------斗鱼------#
 ### 如遇到斗鱼录制卡顿可以尝试切换线路。可选以下线路
 ### tctc-h5（备用线路4）, tct-h5（备用线路5）, ali-h5（备用线路6）, hw-h5（备用线路7）, hs-h5（备用线路13）
-#douyucdn: tct-h5
-### 录制斗鱼弹幕，默认关闭【目前暂时不支持视频按时长分段下的弹幕文件自动分段，只有使用ffmpeg（包括streamlink混合模式）作为下载器才支持】
+#douyu_cdn: tct-h5
+### 录制斗鱼弹幕，默认关闭
 #douyu_danmaku: false
 ### 斗鱼自选画质
 ### 刚开播可能没有除了原画之外的画质 会先录制原画 后续视频分段(仅ffmpeg streamlink)时录制设置的画质
@@ -62,8 +64,9 @@ check_sourcecode: 15
 #------虎牙------#
 ### 如遇到虎牙录制卡顿可以尝试切换线路。可选以下线路
 ### AL（阿里云 - 直播线路3）, TX（腾讯云 - 直播线路5）, HW（华为云 - 直播线路6）, WS（网宿）, HS（火山引擎 - 直播线路14）, AL13（阿里云）, HW16（华为云）, HY(星域云 - 直播线路66)
-#huyacdn: AL
-### 录制虎牙弹幕，默认关闭【目前暂时不支持视频按时长分段下的弹幕文件自动分段，只有使用ffmpeg（包括streamlink混合模式）作为下载器才支持】
+#huya_cdn: AL
+#huya_cdn_fallback: false
+### 录制虎牙弹幕，默认关闭
 #huya_danmaku: false
 ### 虎牙自选录制码率
 ### 可以避免录制如20M的码率，每小时8G左右大小，上传及转码耗时过长。
@@ -72,7 +75,7 @@ check_sourcecode: 15
 #huya_max_ratio: 10000
 
 #------抖音------#
-### 录制抖音弹幕，默认关闭【目前暂时不支持视频按时长分段下的弹幕文件自动分段，只有使用ffmpeg（包括streamlink混合模式）作为下载器才支持】
+### 录制抖音弹幕，默认关闭
 #douyin_danmaku: false
 ### 抖音自选画质
 ### 刚开播可能没有除了原画之外的画质 会先录制原画 后续视频分段(仅ffmpeg streamlink)时录制设置的画质
@@ -82,8 +85,12 @@ check_sourcecode: 15
 
 
 #------哔哩哔哩------#
-### 录制BILIBILI弹幕，目前暂时不支持视频按时长分段下的弹幕文件自动分段，只有使用ffmpeg（包括streamlink混合模式）作为下载器才支持，默认关闭
+### 录制BILIBILI弹幕，下载器为ffmpeg,streamlink时效果最优，默认关闭
 # bilibili_danmaku: false
+### 录制的弹幕信息中包含发送者昵称、用户UID，同时保存醒目留言、上舰、礼物信息。仅 bilibili_danmaku 开启时生效，默认关闭（实验性质：可能与弹幕转ass工具不兼容）
+# bilibili_danmaku_detail: false
+### 录制B站服务器返回的原始弹幕信息，方便有技术能力的用户对主播弹幕数据进行统计。仅 bilibili_danmaku 开启时生效，默认关闭，开启后弹幕文件会每隔5分钟写入一次（实验性质：可能导致弹幕文件巨大）
+# bilibili_danmaku_raw: false
 ### 哔哩哔哩直播流协议.可选 stream（flv流）,hls_ts(ts流）与hls_fmp4（fmp4流），默认为stream
 ### 仅国内IP可以解析到fmp4流。海外IP只能获取到flv流（ov05与ov07）和ts流（ov105）
 ### 由于fmp4出现需要一定时间，或者某些小主播（大部分只有原画选项的主播）无fmp4流。
@@ -91,7 +98,7 @@ check_sourcecode: 15
 ### 由于ffmpeg只能单线程下载，并且stream-gears录制有问题，所以目前fmp4流只能使用streamlink+ffmpeg混合模式。
 #bili_protocol: stream
 ### 哔哩哔哩直播优选CDN，默认无，支持同时填入多个CDN节点。
-#bili_perfCDN: 'cn-gotcha208,ov-gotcha05'
+#bili_cdn: [cn-gotcha204, ov-gotcha05]
 ### 哔哩哔哩强制真原画（仅限TS与FMP4流的 cn-gotcha01 CDN，且 bili_qn >= 10000），默认为关闭
 ### 不保证可用性。当无法强制获取到真原画时，将会自动回退到二压原画。
 #bili_force_source: false
@@ -102,19 +109,15 @@ check_sourcecode: 15
 ### 大陆机器玩法：bili_liveapi取消注释保持默认使用官方API，并将bili_fallback_api设置为能获取到海外节点API，然后优选fmp4流并使用streamlink下载器，最后设置优选cn-gotcha208,ov-gotcha05两个节点。
 ### 这样大主播可以使用cn208的fmp4流稳定录制（海外机如需可以通过自建dns优选指定线路的cn208节点），没有fmp4流的小主播也可以会退到ov05录制flv流。
 #bili_fallback_api: 'https://api.live.bilibili.com'
-### CDN自动Fallback开关，默认为开启，例如海外机器优选ov05之后，如果ov05流一直无法下载，将会自动fallback到ov07进行下载。
-#bili_cdn_fallback: true
-### 强制替换ov-gotcha05的下载地址为指定的自选IP
-#bili_force_ov05_ip: '163.171.197.234'
+### CDN自动Fallback开关，默认为关闭，例如海外机器优选ov05之后，如果ov05流一直无法下载，将会自动fallback到ov07进行下载。
+#bili_cdn_fallback: false
 ### 强制替换cn-gotcha01（叔叔自建）为指定的自选域名组（可多个域名，请用逗号分隔）
 ### 完整CDN列表请参考 https://rec.danmuji.org/dev/bilibili-cdn/ 中"B站视频云"的部分
-### 此功能目前会和stream-gears冲突导致很多分段，请考虑使用ffmpeg录制
 ### 如果海外机器需要使用此功能，需要在bili_liveapi中指定国内的反代API来获取cn-gotcha01的节点信息。
 ### 海外机的玩法：配合一个国内的机器（例如便宜的腾讯云，阿里云等等）自建反代api.live.bilibili.com。或者使用https://docs.qq.com/doc/DV2dvbXBrckNscU9x 此处提供的公用反代API。
 ### 如果海外机到联通或者移动网络线路还不错，就可以参考***完整CDN列表***选取一些联通或者移动的节点并填入下面
 ### 每次会随机返回填入的其中一个线路，并且会自动判断所填入的节点是否可用
-#bili_force_cn01: false
-#bili_force_cn01_domains: 'cn-jxnc-cm-01-16.bilivideo.com,cn-gddg-cm-01-06.bilivideo.com,cn-fjqz-cm-01-06.bilivideo.com,cn-jssz-cm-01-02.bilivideo.com,cn-gddg-ct-01-12.bilivideo.com'
+#bili_replace_cn01: [cn-tj-cm-01-03, cn-gddg-cm-01-03, cn-fjqz-cm-01-03, cn-jssz-cm-02-26, cn-gdfs-ct-01-12]
 ### 哔哩哔哩自选画质
 ### 刚开播可能没有除了原画之外的画质 会先录制原画 后续视频分段(仅ffmpeg streamlink)时录制设置的画质
 ### 30000 杜比,20000 4K,10000 原画,401 蓝光(杜比),400 蓝光,250 超清,150 高清,80 流畅,0 B站默认(多数情况下是蓝光 400)
@@ -164,14 +167,18 @@ check_sourcecode: 15
 #youtube_enable_download_playback: true
 
 #------Twitch直播录制------#
-### 录制Twitch弹幕，默认关闭【只有下载器为FFMPEG时才有效】
+### 录制Twitch弹幕，默认关闭
 #twitch_danmaku: false
-### 去除Twitch广告功能，默认开启【只有下载器为FFMPEG时才有效】
+### 去除Twitch广告功能，默认开启
 ### 这个功能会导致Twitch录播分段，因为遇到广告就自动断开了，这就是去广告。若需要录播完整一整段可以关闭这个，但是关了之后就会有紫色屏幕的CommercialTime
 ### 还有一个不想视频分段的办法是去花钱开一个Turbo会员，能不看广告，然后下面的user里把twitch的cookie填上，也能不看广告，自然就不会分段了
 #twitch_disable_ads: true
 
-
+#------TwitCasting------#
+### 录制Twitch弹幕，默认关闭
+#twitcasting_danmaku: false
+### TwitCasting直播间密码 (可在录制主播设置中为主播单独配置)
+#twitcasting_password:
 
 ######### 录制主播设置 #########
 streamers:
@@ -216,8 +223,13 @@ streamers:
         tags:
             - biliup
             - 视频标签
+        #time_range: "[\"2025-03-26T16:00:00.000Z\",\"2025-03-27T15:59:59.000Z\"]" ### 录制时间范围 ISO 8601 格式的时间数组字符串
+        #excluded_keywords: ### 如果房间名包含关键词，则停止或不录制该场直播，每个关键词需单独一行
         #preprocessor: ### 开始下载直播时触发，将按自定义顺序执行自定义操作 注：preprocessor仅支持shell指令
             #- run: sh ./run.sh, ### 执行任意命令，等同于在shell中运行,preprocessor输出的数据为JSON格式，包含主播名字(name)、开播地址(url)和开播时间(start_time)(时间戳)
+        ### 分段时触发 返回当前生成的文件
+        #segment_processor:
+        #    - run: sh ./run.sh, ### 执行任意命令，等同于在shell中运行
         ### 准备上传直播时触发，将按自定义顺序执行自定义操作 注：downloaded_processor仅支持shell指令
         ### room_title 在重启后会丢失 默认为当前配置名称
         ### start_time end_time在重启后会丢失时间 默认为当前时间
@@ -235,6 +247,9 @@ streamers:
         #opt_args: ### ffmpeg参数
         #    - '-ss'
         #    - '00:00:16' # 跳过开始的16秒
+        override: # 覆盖全局配置
+            downloader: 'sync-downloader'
+            bili_qn: 30000
 
 
 
