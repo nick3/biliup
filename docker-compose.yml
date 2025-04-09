@@ -1,7 +1,7 @@
 version: '3'
 services:
   biliup:
-    image: ghcr.io/biliup/caution:latest
+    image: nick3/biliup:latest
     container_name: biliup
     restart: unless-stopped
     ports:
