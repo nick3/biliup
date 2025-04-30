@@ -210,7 +210,10 @@ class DownloadBase(ABC):
             # 文件名不含后戳
             fmt_file_name = self.gen_download_filename(is_fmt=True)
             # ffmpeg 输入参数
-            input_args = []
+            input_args = [
+                # '-http_proxy', 'http://127.0.0.1:10808',
+                # "-fflags", "+genpts",
+            ]
             # ffmpeg 输出参数
             output_args = [
                 '-c',
@@ -590,7 +593,7 @@ def get_valid_filename(name):
     '{self.fname}%Y-%m-%dT%H_%M_%S'
     """
     # s = str(name).strip().replace(" ", "_") #因为有些人会在主播名中间加入空格，为了避免和录播完毕自动改名冲突，所以注释掉
-    s = re.sub(r"(?u)[^-\w.%{}\[\]【】「」（）・°、。\s]", "", str(name))
+    s = re.sub(r"(?u)[^-\w.%{}\[\]【】「」（）・°、。+\s]", "", str(name))
     if s in {"", ".", ".."}:
         raise RuntimeError("Could not derive file name from '%s'" % name)
     return s
