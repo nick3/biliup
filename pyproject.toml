@@ -1,9 +1,19 @@
 [build-system]
-requires = ['pip>=24.2', 'setuptools>=74', 'wheel']
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
+features = ["pyo3/extension-module"]
+# Include additional files
+include = [ "biliup/web/public/**/*" ]
+#data = "biliup/web/public"
+python-packages = ["biliup"]
+manifest-path = "crates/stream-gears/Cargo.toml"
 
 [project]
 name = "biliup"
+readme = "README.md"
 authors = [{ name = "ForgQi" }]
 description = "stream download and upload"
 keywords = ["bilibili douyu huya"]
@@ -11,18 +21,17 @@ urls = { Homepage = "https://github.com/ForgQi/bilibiliupload" }
 requires-python = ">= 3.9"
 dependencies = [
     "tomli-w>=1.0.0",
-    "stream-gears >= 0.2.2,<0.3",
     "psutil >= 5.4.6",
     "aiofiles >= 22.1.0",
-    "yt-dlp >= 2025.3.31",
+    "yt-dlp >= 2025.7.21",
     "Pillow >= 5.2.0",
-    "aiohttp[speedups] < 3.10.0", # aio-libs/aiohttp#10519
+    "aiohttp[speedups] >= 3.9.5", # aio-libs/aiohttp#10519
     "aiohttp_cors >= 0.7.0",
     "requests >= 2.32.3",
     "httpx[http2] >= 0.28.1",
     "httpcore >= 1.0.7",
     "PyYAML >= 4.2b1",
-    "streamlink >= 7.2.0",
+    "streamlink >= 7.5.0",
     "ykdl >= 1.8.0",
     "rsa >= 4.6",
     "tomli >= 1.1.0; python_version < '3.11'",
@@ -38,23 +47,19 @@ dynamic = ["version"]
 [project.optional-dependencies]
 selenium = ["selenium >= 3.8.1"]
 
-[project.readme]
-file = "README.md"
-content-type = "text/markdown"
-
 [project.scripts]
 biliup = "biliup.__main__:arg_parser"
 
-[tool.setuptools]
-license-files = ["LICENSE"]
-include-package-data = false
+#[tool.setuptools]
+#license-files = ["LICENSE"]
+#include-package-data = false
 
-[tool.setuptools.package-data]
-biliup = ["common/*.ini", "web/public/**", "web/public/build/*", "database/migration/*", "Danmaku/douyin_util/webmssdk.js"]
-
-[tool.setuptools.packages.find]
-include = ["biliup*"]
-namespaces = false
-
-[tool.setuptools.dynamic]
-version = { attr = "biliup.__version__" }
+#[tool.setuptools.package-data]
+#biliup = ["common/*.ini", "web/public/**", "web/public/build/*", "database/migration/*", "Danmaku/douyin_util/webmssdk.js"]
+#
+#[tool.setuptools.packages.find]
+#include = ["biliup*"]
+#namespaces = false
+#
+#[tool.setuptools.dynamic]
+#version = { attr = "biliup.__version__" }

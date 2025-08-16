@@ -12,7 +12,10 @@ RUN set -eux; \
 FROM python:3.12-slim as biliup
 ARG repo_url=https://github.com/nick3/biliup
 ARG branch_name=master
-ENV TZ=Asia/Shanghai
+ENV TZ="Asia/Shanghai"
+ENV LANG="C.UTF-8"
+ENV LANGUAGE="C.UTF-8"
+ENV LC_ALL="C.UTF-8"
 EXPOSE 19159/tcp
 VOLUME /opt
 

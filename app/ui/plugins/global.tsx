@@ -35,14 +35,18 @@ const Global: React.FC = () => {
             <div style={{ fontSize: '14px' }}>
               选择全局默认的下载插件, 可选:
               <br />
-              1. streamlink（仅限 hls 流，不支持的流将回退到 ffmpeg。需安装 FFmpeg）
+              1. streamlink（仅限 hls 流，不支持的流将回退到 ffmpeg。非 Docker 用户需自行安装 FFmpeg）
               <br />
-              2. ffmpeg（需安装 FFmpeg）
+              2. ffmpeg（非 Docker 用户需自行安装 FFmpeg）
               <br />
               3. stream-gears（默认。防 FLV 流花屏）
               <br />
               4. sync-downloader（流式边录边传，需先为主播设定上传模板。不受
-              pool2/threads/segment_time 控制，默认 3 线程上传，请确保上传带宽充足。需安装 FFmpeg）详见 Wiki <a href="https://github.com/biliup/biliup/wiki/%E8%BE%B9%E5%BD%95%E8%BE%B9%E4%BC%A0%E5%8A%9F%E8%83%BD" target="_blank" rel="noopener noreferrer" >点击查看</a>
+              pool2/threads/segment_time 控制，默认 3 线程上传，请确保上传带宽充足。非 Docker 用户需自行安装 FFmpeg）详见 Wiki <a href="https://github.com/biliup/biliup/wiki/%E8%BE%B9%E5%BD%95%E8%BE%B9%E4%BC%A0%E5%8A%9F%E8%83%BD" target="_blank" rel="noopener noreferrer" >点击查看</a>
+              <br />
+              5. ytarchive（仅适用于 Youtube Live）
+              <br />
+              {/* 6. mesio（基于 Rust 的命令行视频下载/修复器）详见 <a href="https://github.com/hua0512/rust-srec/tree/main/mesio-cli" target="_blank" rel="noopener noreferrer" >项目主页</a> */}
             </div>
           }
           style={{ width: '100%' }}
@@ -56,6 +60,8 @@ const Global: React.FC = () => {
           <Select.Option value="ffmpeg">ffmpeg</Select.Option>
           <Select.Option value="stream-gears">stream-gears（默认）</Select.Option>
           <Select.Option value="sync-downloader">sync-downloader（边录边传）</Select.Option>
+          <Select.Option value="ytarchive">ytarchive（仅适用于 Youtube Live）</Select.Option>
+          {/* <Select.Option value="mesio">mesio</Select.Option> */}
         </Form.Select>
         {formApi.getValue('downloader') === 'sync-downloader' ? (
           <>
@@ -285,8 +291,9 @@ const Global: React.FC = () => {
           }}
           showClear={true}
         >
-          <Form.Select.Option value="web">网页端（web）</Form.Select.Option>
-          <Form.Select.Option value="client">客户端（client）</Form.Select.Option>
+          <Form.Select.Option value="app">安卓APP（app）</Form.Select.Option>
+          <Form.Select.Option value="b-cut-android">BCut安卓APP（b-cut-android）</Form.Select.Option>
+          <Form.Select.Option value="web">网页（web）</Form.Select.Option>
         </Form.Select>
         <Form.Select
           field="uploader"
@@ -332,6 +339,18 @@ const Global: React.FC = () => {
           placeholder={3}
           extraText="单文件并发上传数,未达到带宽上限时,增大此值可提高上传速度(不要设置过大,部分线路限制为8,如速度不佳优先调整上传线路)"
           label="上传并发（threads）"
+          style={{ width: '100%' }}
+          fieldStyle={{
+            alignSelf: 'stretch',
+            padding: 0,
+          }}
+          showClear={true}
+        />
+        <Form.InputNumber
+          field="max_upload_limit"
+          placeholder={8}
+          extraText="录播上传次数上限，防止因意外情况如B站接口抽风、录播本身损坏导致录播反复上传浪费宽带或被B站风控（注：限制是记录在程序上下文中的，重启程序会重置上传次数限制；且为了保证尽量不改动老用户使用逻辑，默认将此值设置为一个较大的值，一般推荐设置为2-3）"
+          label="上传重试次数限制（max_upload_limit）"
           style={{ width: '100%' }}
           fieldStyle={{
             alignSelf: 'stretch',
