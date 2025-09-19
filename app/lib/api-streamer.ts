@@ -1,165 +1,62 @@
-// Fetcher implementation.
-// The extra argument will be passed via the `arg` property of the 2nd parameter.
-// In the example below, `arg` will be `'my_token'`
-export async function sendRequest<T>(url: string, { arg }: {arg: T}) {
-  // 获取认证信息
-  const auth = typeof window !== 'undefined' ? localStorage.getItem('auth') : null;
-  
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  
-  // 如果存在认证信息，则添加到请求头
-  if (auth) {
-    headers['Authorization'] = `Basic ${auth}`;
-  }
-  
-  const res =  await fetch((process.env.NEXT_PUBLIC_API_SERVER ?? '') + url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(arg)
-  });
-  if(!(res.status >=200 && res.status < 300)) {
-    throw new Error(await res.text());
-  }
-  const data =  await res.json();
-  if (!res.ok) {
-    throw new Error(data.message);
-  }
-  return data;
+// Fetcher implementation. // The extra argument will be passed via the `arg` property of the 2nd parameter.// In the example below, `arg` will be `'my_token'`
+export const API_BASE = process.env.NEXT_PUBLIC_API_SERVER ?? '';
+export async function sendRequest<T>(url: string, { arg }: { arg: T }) {
+	const res = await fetch(API_BASE + url, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(arg),
+	});
+	await handleResponse(res);
+	return res.json();
 }
 
-export const fetcher = async (...args: any[]) => {
-  // 获取认证信息
-  const auth = typeof window !== 'undefined' ? localStorage.getItem('auth') : null;
-  
-  // 创建请求配置
-  const init = args[1] || {};
-  const headers: HeadersInit = init.headers || {};
-  
-  // 如果存在认证信息，则添加到请求头
-  if (auth) {
-    // 将headers转换为可修改的对象
-    let headersObj: Record<string, string> = {};
-    if (headers instanceof Headers) {
-      headers.forEach((value, key) => {
-        headersObj[key] = value;
-      });
-    } else if (Array.isArray(headers)) {
-      headersObj = Object.fromEntries(headers);
-    } else {
-      headersObj = { ...headers };
-    }
-    headersObj['Authorization'] = `Basic ${auth}`;
-    
-    const res = await fetch((process.env.NEXT_PUBLIC_API_SERVER ?? '') + args[0], {
-      ...init,
-      headers: headersObj
-    });
-    if (!res.ok) {
-      throw new Error(await res.text());
-    }
-    return res.json();
-  }
-  
-  // 如果没有认证信息，直接发送请求
-  const res = await fetch((process.env.NEXT_PUBLIC_API_SERVER ?? '') + args[0], {
-    ...init,
-    headers
-  });
-  if (!res.ok) {
-    throw new Error(await res.text());
-  }
-  return res.json();
+export const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+	const res = await fetch(API_BASE + input, init);
+	await handleResponse(res);
+	return res.json();
+};
+
+export const proxy = async (input: RequestInfo | URL, init?: RequestInit) => {
+	const res = await fetch(API_BASE + input, init);
+	await handleResponse(res);
+	return res;
+};
+
+export async function requestDelete<T>(url: string, { arg }: { arg: T }) {
+	const res = await fetch(`${API_BASE}${url}/${arg}`, { method: 'DELETE' });
+	await handleResponse(res);
+	return res;
 }
 
-export const proxy = async (input: RequestInfo | URL, init?: RequestInit | undefined) => {
-  // 获取认证信息
-  const auth = typeof window !== 'undefined' ? localStorage.getItem('auth') : null;
-  
-  // 创建请求配置
-  const requestInit = init || {};
-  const headers: HeadersInit = requestInit.headers || {};
-  
-  // 如果存在认证信息，则添加到请求头
-  if (auth) {
-    // 将headers转换为可修改的对象
-    let headersObj: Record<string, string> = {};
-    if (headers instanceof Headers) {
-      headers.forEach((value, key) => {
-        headersObj[key] = value;
-      });
-    } else if (Array.isArray(headers)) {
-      headersObj = Object.fromEntries(headers);
-    } else {
-      headersObj = { ...headers };
-    }
-    headersObj['Authorization'] = `Basic ${auth}`;
-    
-    const res = await fetch((process.env.NEXT_PUBLIC_API_SERVER ?? '') + input, {
-      ...requestInit,
-      headers: headersObj
-    });
-    if (!res.ok) {
-      throw new Error(await res.text());
-    }
-    return res;
-  }
-  
-  // 如果没有认证信息，直接发送请求
-  const res = await fetch((process.env.NEXT_PUBLIC_API_SERVER ?? '') + input, {
-    ...requestInit,
-    headers
-  });
-  if (!res.ok) {
-    throw new Error(await res.text());
-  }
-  return res;
+export async function put<T>(url: string, { arg }: { arg: T }) {
+	const res = await fetch(`${API_BASE}${url}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(arg),
+	});
+	await handleResponse(res);
+	return res;
 }
 
-export async function requestDelete<T>(url: string, { arg }: {arg: T}) {
-  // 获取认证信息
-  const auth = typeof window !== 'undefined' ? localStorage.getItem('auth') : null;
-  
-  const headers: Record<string, string> = {};
-  
-  // 如果存在认证信息，则添加到请求头
-  if (auth) {
-    headers['Authorization'] = `Basic ${auth}`;
-  }
-  
-  const res =  await fetch(`${process.env.NEXT_PUBLIC_API_SERVER ?? ''}${url}/${arg}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!res.ok) {
-    throw new Error(await res.text());
-  }
-  return res;
-}
+async function handleResponse(res: Response) {
+	// 如果未登录，统一跳转
+	if (res.status === 401) {
+		// 可选：清理本地状态/缓存
+		// localStorage.removeItem('token') 等
 
-export async function put<T>(url: string, { arg }: {arg: T}) {
-  // 获取认证信息
-  const auth = typeof window !== 'undefined' ? localStorage.getItem('auth') : null;
-  
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
-  };
-  
-  // 如果存在认证信息，则添加到请求头
-  if (auth) {
-    headers['Authorization'] = `Basic ${auth}`;
-  }
-  
-  const res =  await fetch(`${process.env.NEXT_PUBLIC_API_SERVER ?? ''}${url}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(arg)
-  });
-  if (!res.ok) {
-    throw new Error(await res.text());
-  }
-  return res;
+		// 跳转登录（带回跳）
+		const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
+		window.location.href = `/login?next=${returnTo}`;
+		// 抛错让 SWR 知道失败（别返回 json）
+		throw new Error('Unauthorized');
+	}
+
+	if (!res.ok) {
+		// 尽量返回服务端错误信息
+		const text = await res.text().catch(() => '');
+		throw new Error(text || `HTTP ${res.status}`);
+	}
+	return res;
 }
 
 type Credit = {
