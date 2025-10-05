@@ -1,12 +1,19 @@
-use crate::server::core::download_manager::{ActorHandle, DownloaderMessage};
+use crate::server::common::download::DownloaderMessage;
+use crate::server::common::util::Recorder;
+use crate::server::core::download_manager::ActorHandle;
 use crate::server::core::plugin::{DownloadPlugin, StreamStatus};
+use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::{Context, Stage, Worker, WorkerStatus};
+use crate::server::infrastructure::models::StreamerInfo;
 use async_channel::{Receiver, Sender, bounded};
+use chrono::Local;
+use ormlite::Model;
+use ormlite::model::ModelBuilder;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{error, info};
 
 /// 启动客户端监控循环
 ///
@@ -19,6 +26,7 @@ async fn start_client(
     rooms_handle: Arc<RoomsHandle>,
     plugin: Arc<dyn DownloadPlugin + Send + Sync>,
     actor_handle: Arc<ActorHandle>,
+    pool: ConnectionPool,
     mut interval: u64,
 ) {
     let platform_name = &rooms_handle.name;
@@ -26,22 +34,56 @@ async fn start_client(
     loop {
         // 获取下一个要检查的房间
         if let Some(room) = rooms_handle.next().await {
-            let ulr = room.get_streamer().url;
+            let url = room.get_streamer().url;
             interval = room.get_config().event_loop_interval;
-            info!("[{platform_name}] room: {ulr}");
-            let mut ctx = Context::new(room.clone());
+            let mut ctx = Context::new(room.clone(), pool.clone());
             // 检查直播状态
-            match plugin.check_status(&mut ctx).await.unwrap() {
-                StreamStatus::Live { stream_info } => {
-                    info!("room: {ulr} is live -> {:?}", stream_info);
+            match plugin.check_status(&mut ctx).await {
+                Ok(StreamStatus::Live { mut stream_info }) => {
+                    let sql_no_id = &stream_info.streamer_info;
+                    let insert = match StreamerInfo::builder()
+                        .url(sql_no_id.url.clone())
+                        .name(room.live_streamer.remark.clone())
+                        .title(sql_no_id.title.clone())
+                        .date(sql_no_id.date.clone())
+                        .live_cover_path(sql_no_id.live_cover_path.clone())
+                        .insert(&ctx.pool)
+                        .await
+                    {
+                        Ok(insert) => insert,
+                        Err(e) => {
+                            error!(e=?e, "插入数据库失败");
+                            continue;
+                        }
+                    };
+                    info!(url = url, "room: is live -> 开播了");
                     // 更新状态为等待中
                     room.change_status(Stage::Download, WorkerStatus::Pending);
+                    stream_info.streamer_info = insert;
+
+                    let streamer = room.get_streamer();
+                    // 确定文件格式后缀
+                    let suffix = streamer
+                        .format
+                        .unwrap_or_else(|| stream_info.suffix.clone());
+                    // 创建录制器
+                    let recorder = Recorder::new(
+                        streamer
+                            .filename_prefix
+                            .or(room.get_config().filename_prefix.clone()),
+                        &streamer.remark,
+                        &stream_info.streamer_info.title,
+                        &suffix,
+                        stream_info.streamer_info.date.with_timezone(&Local),
+                    );
+                    // 修改 ctx
+                    ctx.stream_info = stream_info;
+                    ctx.recorder = recorder;
                     // 发送下载开始消息
                     if actor_handle
                         .down_sender
                         .send(DownloaderMessage::Start(
                             plugin.clone(),
-                            stream_info,
                             ctx,
                             rooms_handle.clone(),
                         ))
@@ -52,8 +94,9 @@ async fn start_client(
                         rooms_handle.toggle(room).await;
                     }
                 }
-                StreamStatus::Offline => {}
-                StreamStatus::Unknown => {}
+                Ok(StreamStatus::Offline) => {}
+                Ok(StreamStatus::Unknown) => {}
+                Err(e) => error!(e=?e, ctx=ctx.worker.live_streamer.url,"检查直播间出错"),
             };
         }
         // 等待下一次检查
@@ -80,6 +123,7 @@ impl Monitor {
     pub fn new(
         plugin: Arc<dyn DownloadPlugin + Send + Sync>,
         actor_handle: Arc<ActorHandle>,
+        pool: ConnectionPool,
     ) -> Self {
         // 创建房间处理器
         let handle = Arc::new(RoomsHandle::new(plugin.name()));
@@ -87,7 +131,7 @@ impl Monitor {
         let join_handle = tokio::spawn({
             let handle = Arc::clone(&handle);
             async move {
-                start_client(handle, plugin, actor_handle, 10).await;
+                start_client(handle, plugin, actor_handle, pool, 10).await;
             }
         });
         Self {
@@ -251,8 +295,8 @@ impl RoomsActor {
                 let _ = respond_to.send(self.next());
             }
             ActorMessage::Add(worker) => {
+                info!("Added room [{}]", worker.live_streamer.url);
                 self.rooms.push(worker);
-                info!("Added room [{:?}]", self.rooms);
             }
             ActorMessage::Del { respond_to, id } => {
                 // `let _ =` 忽略发送时的任何错误
@@ -286,13 +330,14 @@ impl RoomsActor {
     fn del(&mut self, id: i64) -> usize {
         // 从活跃房间列表中删除
         if let Some(i) = self.rooms.iter().position(|x| x.live_streamer.id == id) {
+            info!("Removed room [{:?}] {}", self.rooms.len(), i);
             self.rooms.remove(i); // 保序，但O(n)
         } else if let Some(i) = self.waiting.iter().position(|x| x.live_streamer.id == id) {
+            info!("Deleting room [{:?}] {}", self.waiting.len(), i);
             // 从等待房间列表中删除
             self.waiting.swap_remove(i);
         };
-        info!("Removed room [{:?}] {}", self.rooms, self.rooms.len());
-        info!("Deleting room [{:?}] {}", self.waiting, self.waiting.len());
+
         self.rooms.len() + self.waiting.len()
     }
 

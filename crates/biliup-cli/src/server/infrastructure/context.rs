@@ -1,8 +1,11 @@
+use crate::server::common::util::Recorder;
 use crate::server::config::Config;
 use crate::server::core::downloader::Downloader;
+use crate::server::core::plugin::StreamInfoExt;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
-use crate::server::infrastructure::models::{LiveStreamer, UploadStreamer};
+use crate::server::infrastructure::models::live_streamer::LiveStreamer;
+use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::infrastructure::repositories::{get_config, get_streamer};
 use axum::http::Extensions;
 use biliup::client::StatelessClient;
@@ -18,8 +21,11 @@ use tracing::info;
 pub struct Context {
     /// 工作器实例
     pub worker: Arc<Worker>,
+    pub stream_info: StreamInfoExt,
     /// 扩展数据容器
     pub extension: Extensions,
+    pub pool: ConnectionPool,
+    pub recorder: Recorder,
 }
 
 impl Context {
@@ -27,10 +33,13 @@ impl Context {
     ///
     /// # 参数
     /// * `worker` - 工作器实例的Arc引用
-    pub fn new(worker: Arc<Worker>) -> Self {
+    pub fn new(worker: Arc<Worker>, pool: ConnectionPool) -> Self {
         Self {
             worker,
+            stream_info: Default::default(),
             extension: Default::default(),
+            pool,
+            recorder: Default::default(),
         }
     }
 }
@@ -141,7 +150,7 @@ pub enum Stage {
 }
 
 /// 工作器状态枚举
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub enum WorkerStatus {
     /// 正在工作
     Working(Arc<dyn Downloader>),
@@ -150,6 +159,8 @@ pub enum WorkerStatus {
     /// 空闲状态（默认）
     #[default]
     Idle,
+    /// 下载暂停中
+    Pause,
 }
 
 // 简单 Debug：打印状态名，忽略内部 downloader
@@ -159,6 +170,7 @@ impl fmt::Debug for WorkerStatus {
             WorkerStatus::Working(_) => "Working",
             WorkerStatus::Pending => "Pending",
             WorkerStatus::Idle => "Idle",
+            WorkerStatus::Pause => "Pause",
         };
         f.write_str(name)
     }

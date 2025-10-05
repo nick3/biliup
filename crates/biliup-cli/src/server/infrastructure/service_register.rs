@@ -4,7 +4,8 @@ use crate::server::core::monitor::Monitor;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::{Context, Worker, WorkerStatus};
-use crate::server::infrastructure::models::{LiveStreamer, UploadStreamer};
+use crate::server::infrastructure::models::live_streamer::LiveStreamer;
+use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use axum::extract::FromRef;
 use biliup::client::StatelessClient;
 use error_stack::bail;
@@ -47,8 +48,6 @@ impl ServiceRegister {
         info!("initializing utility services...");
         // 创建默认的HTTP客户端
         let client = StatelessClient::default();
-
-        info!(config=?config);
 
         info!("utility services initialized, building feature services...");
 
@@ -98,10 +97,10 @@ impl ServiceRegister {
             self.client.clone(),
         ));
         // 将工作器添加到监控器和工作器列表中
-        let monitor = manager.ensure_monitor();
+        let monitor = manager.ensure_monitor(self.pool.clone());
         monitor.rooms_handle.add(worker.clone()).await;
         self.workers.write().unwrap().push(worker.clone());
-        info!("add {worker:?} success");
+        info!("add {} success", worker.live_streamer.url);
         Ok(Some(()))
     }
 
@@ -130,7 +129,7 @@ impl ServiceRegister {
             bail!(AppError::Unknown)
         };
         // 从监控器中删除房间
-        let monitor = manager.ensure_monitor();
+        let monitor = manager.ensure_monitor(self.pool.clone());
         let len = monitor.rooms_handle.del(id).await;
         info!("id: {id} removed, remained len {len}");
         // 如果没有剩余房间，清理监控器

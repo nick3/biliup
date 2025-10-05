@@ -3,10 +3,12 @@ use axum::http;
 use crate::server;
 use crate::server::api::auth;
 use crate::server::api::spa::static_handler;
+use crate::server::api::ws::ws_logs;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::service_register::ServiceRegister;
 use crate::server::infrastructure::users::Backend;
 use axum::http::HeaderValue;
+use axum::routing::get;
 use axum_login::{AuthManagerLayerBuilder, login_required};
 use error_stack::ResultExt;
 use std::net::SocketAddr;
@@ -46,8 +48,8 @@ impl ApplicationController {
         // 配置会话管理层
         let session_layer = SessionManagerLayer::new(session_store)
             .with_secure(false)
-            .with_expiry(Expiry::OnInactivity(Duration::days(1)))
-            .with_signed(key);
+            .with_expiry(Expiry::OnInactivity(Duration::days(7)));
+        // .with_signed(key);
 
         // 认证服务配置
         // 将会话层与后端结合，建立认证服务，将认证会话作为请求扩展提供
@@ -75,6 +77,7 @@ impl ApplicationController {
                     .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
                     .allow_methods(AllowMethods::any()),
             )
+            .route("/v1/ws/logs", get(ws_logs)) // 获取视频列表
             .fallback(static_handler); // 静态文件处理回退
 
         // 启动HTTP服务器

@@ -1,6 +1,7 @@
 use crate::server::core::downloader::DownloaderType;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::models::hook_step::HookStep;
+use biliup::bilibili::Credit;
 use error_stack::bail;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path, path::PathBuf};
@@ -107,6 +108,9 @@ pub struct Config {
     /// 虎牙最大比率
     #[serde(default)]
     pub huya_max_ratio: Option<u32>,
+    /// 虎牙 Flv or Hls
+    #[serde(default)]
+    pub huya_protocol: Option<String>,
 
     // 抖音平台设置
     /// 抖音弹幕录制
@@ -115,6 +119,12 @@ pub struct Config {
     /// 抖音画质
     #[serde(default)]
     pub douyin_quality: Option<String>,
+    /// 双屏直播录制方式
+    #[serde(default)]
+    pub douyin_double_screen: Option<bool>,
+    /// 抖音真原画
+    #[serde(default)]
+    pub douyin_true_origin: Option<bool>,
 
     // 哔哩哔哩平台设置
     /// B站弹幕录制
@@ -294,15 +304,6 @@ pub struct StreamerConfig {
     // “override” 是字段名，这里改为 override_cfg 避免与保留字混淆
     #[serde(rename = "override", default)]
     pub override_cfg: Option<HashMap<String, serde_json::Value>>,
-}
-
-/// 制作人员信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Credit {
-    /// 用户名
-    pub username: String,
-    /// 用户ID
-    pub uid: String,
 }
 
 /// 用户配置结构体

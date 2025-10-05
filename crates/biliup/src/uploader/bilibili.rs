@@ -6,15 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use bon::Builder;
 use std::fmt::{Display, Formatter};
 use std::num::ParseIntError;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::{info, warn};
-use typed_builder::TypedBuilder;
 
-#[derive(Serialize, Deserialize, Debug, TypedBuilder)]
-#[builder(field_defaults(default))]
+#[derive(Serialize, Deserialize, Debug, Builder)]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 pub struct Studio {
     /// 是否转载, 1-自制 2-转载
@@ -37,10 +36,10 @@ pub struct Studio {
 
     /// 视频标题
     #[cfg_attr(feature = "cli", clap(long, default_value_t))]
-    #[builder(!default, setter(into))]
     pub title: String,
 
     #[cfg_attr(feature = "cli", clap(skip))]
+    #[builder(default)]
     pub desc_format_id: u32,
 
     /// 视频简介
@@ -49,7 +48,6 @@ pub struct Studio {
 
     /// 视频简介v2
     #[serde(default)]
-    #[builder(!default)]
     #[cfg_attr(feature = "cli", clap(skip))]
     pub desc_v2: Option<Vec<Credit>>,
 
@@ -59,7 +57,7 @@ pub struct Studio {
 
     #[cfg_attr(feature = "cli", clap(skip))]
     #[serde(default)]
-    #[builder(default, setter(skip))]
+    #[builder(default)]
     pub subtitle: Subtitle,
 
     /// 视频标签，逗号分隔多个tag
@@ -67,7 +65,6 @@ pub struct Studio {
     pub tag: String,
 
     #[serde(default)]
-    #[builder(!default)]
     #[cfg_attr(feature = "cli", clap(skip))]
     pub videos: Vec<Video>,
 
@@ -77,10 +74,12 @@ pub struct Studio {
 
     #[cfg_attr(feature = "cli", clap(skip))]
     #[serde(default)]
+    #[builder(default)]
     pub open_subtitle: bool,
 
     #[cfg_attr(feature = "cli", clap(long, default_value = "0"))]
     #[serde(default)]
+    #[builder(default)]
     pub interactive: u8,
 
     #[cfg_attr(feature = "cli", clap(long))]
@@ -97,6 +96,7 @@ pub struct Studio {
     /// 是否开启 Hi-Res, 0-关闭 1-开启
     #[cfg_attr(feature = "cli", clap(long = "hires", default_value = "0"))]
     #[serde(default)]
+    #[builder(default)]
     pub lossless_music: u8,
 
     /// 0-允许转载，1-禁止转载
@@ -173,7 +173,7 @@ pub struct Subtitle {
     lan: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Credit {
     #[serde(rename(deserialize = "type_id", serialize = "type"))]
     pub type_id: i8,

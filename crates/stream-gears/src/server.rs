@@ -8,13 +8,15 @@ use biliup_cli::server::core::download_manager::{ActorHandle, DownloadManager};
 use biliup_cli::server::core::downloader::ffmpeg_downloader::FfmpegDownloader;
 use biliup_cli::server::core::downloader::stream_gears::StreamGears;
 use biliup_cli::server::core::downloader::{DownloadConfig, Downloader, DownloaderType};
-use biliup_cli::server::core::plugin::{DownloadPlugin, StreamInfo, StreamStatus};
+use biliup_cli::server::core::plugin::{DownloadPlugin, StreamInfoExt, StreamStatus};
 use biliup_cli::server::errors::{AppError, AppResult};
 use biliup_cli::server::infrastructure::connection_pool::ConnectionManager;
 use biliup_cli::server::infrastructure::context::{Context, Worker};
+use biliup_cli::server::infrastructure::models::StreamerInfo;
 use biliup_cli::server::infrastructure::repositories;
 use biliup_cli::server::infrastructure::repositories::get_upload_config;
 use biliup_cli::server::infrastructure::service_register::ServiceRegister;
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use error_stack::{Report, ResultExt};
 use fancy_regex::Regex;
 use pyo3::exceptions::PyRuntimeError;
@@ -70,8 +72,7 @@ impl DownloadPlugin for PyPlugin {
     }
 
     async fn check_status(&self, ctx: &mut Context) -> Result<StreamStatus, Report<AppError>> {
-        info!("Checking status");
-        match call_via_threads(self.plugin.clone(), &ctx.worker.live_streamer.url)
+        match call_via_threads(self.plugin.clone(), ctx)
             .await
             .change_context(AppError::Unknown)?
         {
@@ -89,7 +90,7 @@ impl DownloadPlugin for PyPlugin {
 
     async fn create_downloader(
         &self,
-        stream_info: &StreamInfo,
+        stream_info: &StreamInfoExt,
         // worker: &Worker,
         config: Config,
         recorder: Recorder,
@@ -140,41 +141,44 @@ impl DownloadPlugin for PyPlugin {
 
 async fn call_via_threads(
     obj: Arc<Py<PyType>>,
-    url: &str,
-) -> PyResult<Option<(StreamInfo, Option<Py<PyAny>>)>> {
-    let url = url.to_string();
+    ctx: &mut Context,
+) -> PyResult<Option<(StreamInfoExt, Option<Py<PyAny>>)>> {
+    let url = ctx.worker.live_streamer.url.to_string();
+    let remark = ctx.worker.live_streamer.remark.to_string();
     tokio::task::spawn_blocking(move || {
-        Python::attach(|py| -> PyResult<Option<(StreamInfo, Option<Py<PyAny>>)>> {
-            // 从 biliup.util 获取 loop（按你项目里真实的名字来取）
-            let util = PyModule::import(py, "biliup.common.util")?;
-            // 下面两行二选一（取决于 biliup.util 的 API）：
-            // let loop_obj: Py<PyAny> = util.getattr("loop")?.into_py(py);
-            // 或：
-            // let loop_obj: Py<PyAny> = util.call_method0("get_loop")?.into_py(py);
+        Python::attach(
+            |py| -> PyResult<Option<(StreamInfoExt, Option<Py<PyAny>>)>> {
+                // 从 biliup.util 获取 loop（按你项目里真实的名字来取）
+                let util = PyModule::import(py, "biliup.common.util")?;
+                // 下面两行二选一（取决于 biliup.util 的 API）：
+                // let loop_obj: Py<PyAny> = util.getattr("loop")?.into_py(py);
+                // 或：
+                // let loop_obj: Py<PyAny> = util.call_method0("get_loop")?.into_py(py);
 
-            // 这里假设是直接暴露了 util.loop
-            let loop_obj = util.getattr("loop")?;
+                // 这里假设是直接暴露了 util.loop
+                let loop_obj = util.getattr("loop")?;
 
-            let asyncio = PyModule::import(py, "asyncio")?;
+                let asyncio = PyModule::import(py, "asyncio")?;
 
-            // 生成协程 self.acheck_stream()
-            let instance = obj.bind(py).call1(("fname", url))?;
-            let coro = instance.call_method0("acheck_stream")?;
+                // 生成协程 self.acheck_stream()
+                let instance = obj.bind(py).call1((remark, url))?;
+                let coro = instance.call_method0("acheck_stream")?;
 
-            // 调度到指定 loop
-            let fut = asyncio
-                .getattr("run_coroutine_threadsafe")?
-                .call1((coro, loop_obj))?;
+                // 调度到指定 loop
+                let fut = asyncio
+                    .getattr("run_coroutine_threadsafe")?
+                    .call1((coro, loop_obj))?;
 
-            let res = fut.call_method0("result")?;
-            let is_live = res.unbind().extract(py)?;
-            let info = if is_live {
-                Some(stream_info_from_py(&instance)?)
-            } else {
-                None
-            };
-            Ok(info)
-        })
+                let res = fut.call_method0("result")?;
+                let is_live = res.unbind().extract(py)?;
+                let info = if is_live {
+                    Some(stream_info_from_py(&instance)?)
+                } else {
+                    None
+                };
+                Ok(info)
+            },
+        )
     })
     .await
     .expect("spawn_blocking panicked")
@@ -215,7 +219,7 @@ pub fn from_py(actor_handle: Arc<ActorHandle>) -> PyResult<Vec<DownloadManager>>
 /// end_time 的语义与 Python 中一致：若未提供或为“假值”，则使用 time.localtime()
 pub fn stream_info_from_py(
     self_obj: &Bound<'_, PyAny>,
-) -> PyResult<(StreamInfo, Option<Py<PyAny>>)> {
+) -> PyResult<(StreamInfoExt, Option<Py<PyAny>>)> {
     // 从 self 上获取属性并抽取为 Rust 类型
     let name: String = self_obj.getattr("fname")?.extract()?;
     let url: String = self_obj.getattr("url")?.extract()?;
@@ -224,8 +228,15 @@ pub fn stream_info_from_py(
     let live_cover_path: Option<String> = self_obj.getattr("live_cover_path")?.extract()?;
     let _is_download: bool = self_obj.getattr("is_download")?.extract()?;
     let platform: String = self_obj.getattr("platform")?.extract()?;
-    let stream_headers: HashMap<String, String> = self_obj.getattr("stream_headers")?.extract()?;
-    self_obj.call_method1("update_headers", (&stream_headers,))?;
+
+    let stream_headers: HashMap<String, String> = if platform == "Huya" {
+        let stream_headers = self_obj.getattr("stream_headers")?;
+        self_obj.call_method1("update_headers", (&stream_headers,))?;
+        stream_headers.extract()?
+    } else {
+        self_obj.getattr("stream_headers")?.extract()?
+    };
+
     let danmaku_init = self_obj.call_method0("danmaku_init")?;
     // let platform: Option<PyAny> = self_obj.getattr("danmaku")?.extract()?;
     // danmaku 可能在条件下没有设置（比如 bilibili_danmaku 为 False）
@@ -235,9 +246,9 @@ pub fn stream_info_from_py(
     } else {
         None
     };
-
     // date 直接使用传入的 start_time（保留为 Python 对象）
-    let date = OffsetDateTime::now_utc();
+    // let date = OffsetDateTime::now_utc();
+
     // end_time: 若传入 None 或“假值”，则使用 time.localtime()
     // let end_time_obj: PyObject = match end_time {
     //     Some(et) if et.is_true()? => et.to_object(py),
@@ -249,14 +260,17 @@ pub fn stream_info_from_py(
     // };self.update_headers(self.stream_headers)
 
     Ok((
-        StreamInfo {
-            name,
-            url,
+        StreamInfoExt {
+            streamer_info: StreamerInfo {
+                id: 0,
+                name,
+                url,
+                title,
+                date: Utc::now(),
+                live_cover_path: live_cover_path.unwrap_or_default(),
+            },
             suffix: media_ext_from_url(&raw_stream_url).unwrap(),
             raw_stream_url,
-            title,
-            date,
-            live_cover_path,
             platform,
             stream_headers,
         },
@@ -293,7 +307,17 @@ impl ConfigState {
             {
                 return Ok(d);
             }
-            return Ok(bound);
+            // 尝试转换为字典并过滤
+            return match bound.downcast::<PyDict>() {
+                Ok(dict) => {
+                    let filtered = PyDict::new(py);
+                    dict.iter()
+                        .filter(|(_, v)| !v.is_none())
+                        .try_for_each(|(k, v)| filtered.set_item(k, v))?;
+                    Ok(filtered.into_any())
+                }
+                Err(_) => Ok(bound), // 不是字典，直接返回
+            };
         };
         let Some(default) = default else {
             return Err(pyo3::exceptions::PyAttributeError::new_err(format!(

@@ -118,7 +118,7 @@ impl HookStep {
                 .ok_or(AppError::Custom("Invalid file name".to_string()))?;
             let destination = target_path.join(file_name);
 
-            println!(
+            info!(
                 "Moving {} to {}",
                 video_path.display(),
                 destination.display()
@@ -126,6 +126,22 @@ impl HookStep {
             fs::rename(video_path, destination)
                 .await
                 .change_context(AppError::Unknown)?;
+
+            let buf = video_path.with_extension("xml");
+            if buf.exists() {
+                let file_name = buf
+                    .file_name()
+                    .ok_or(AppError::Custom("Invalid file name".to_string()))?;
+                let destination = target_path.join(file_name);
+                fs::rename(&buf, &destination)
+                    .await
+                    .change_context(AppError::Unknown)?;
+                info!(
+                    "移动弹幕文件: Moving {} to {}",
+                    buf.display(),
+                    destination.display()
+                );
+            }
         }
         Ok(())
     }
@@ -137,10 +153,17 @@ impl HookStep {
     async fn remove_file(&self, video_paths: &[&Path]) -> AppResult<()> {
         // 逐个删除视频文件
         for video_path in video_paths {
-            println!("Removing: {}", video_path.display());
+            info!("删除 - Removing: {}", video_path.display());
             fs::remove_file(video_path)
                 .await
                 .change_context(AppError::Unknown)?;
+            let buf = video_path.with_extension("xml");
+            if buf.exists() {
+                fs::remove_file(&buf)
+                    .await
+                    .change_context(AppError::Unknown)?;
+                info!("删除弹幕文件 - Removing: {}", buf.display());
+            }
         }
         Ok(())
     }

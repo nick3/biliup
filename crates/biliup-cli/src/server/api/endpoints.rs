@@ -1,56 +1,72 @@
+use crate::UploadLine;
+use crate::server::common::upload::{build_studio, submit_to_bilibili, upload};
+use crate::server::common::util::Recorder;
 use crate::server::config::Config;
+use crate::server::core::download_manager::ActorHandle;
+use crate::server::core::downloader::Downloader;
 use crate::server::errors::{AppError, report_to_response};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
-use crate::server::infrastructure::context::Worker;
+use crate::server::infrastructure::context::{Stage, Worker, WorkerStatus};
 use crate::server::infrastructure::dto::LiveStreamerResponse;
+use crate::server::infrastructure::models::live_streamer::{InsertLiveStreamer, LiveStreamer};
+use crate::server::infrastructure::models::upload_streamer::{
+    InsertUploadStreamer, UploadStreamer,
+};
 use crate::server::infrastructure::models::{
-    Configuration, FileItem, InsertConfiguration, InsertLiveStreamer, InsertUploadStreamer,
-    LiveStreamer, StreamerInfo, UploadStreamer,
+    Configuration, FileItem, InsertConfiguration, StreamerInfo,
 };
 use crate::server::infrastructure::repositories::{
     del_streamer, get_all_streamer, get_upload_config,
 };
 use crate::server::infrastructure::service_register::ServiceRegister;
-use axum::extract::{Path, State};
+use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, debug_handler};
 use biliup::credential::Credential;
-use error_stack::{Report, ResultExt};
+use chrono::Local;
+use clap::ValueEnum;
+use error_stack::{Report, ResultExt, bail};
 use ormlite::{Insert, Model};
+use serde::Deserialize;
 use serde_json::json;
+use std::collections::VecDeque;
+use std::io;
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::time::{MissedTickBehavior, interval};
+use tracing::{debug, error, info};
 
 pub async fn get_streamers_endpoint(
     State(pool): State<ConnectionPool>,
     State(workers): State<Arc<RwLock<Vec<Arc<Worker>>>>>,
 ) -> Result<Json<Vec<LiveStreamerResponse>>, Response> {
     let live_streamers = get_all_streamer(&pool).await.map_err(report_to_response)?;
-    info!(
-        "get_streamers_endpoint found {} live streamers",
-        live_streamers.len()
-    );
     Ok(Json(
         live_streamers
             .into_iter()
-            .map(|x| LiveStreamerResponse {
-                status: workers
+            .map(|x| {
+                let option = workers
                     .read()
                     .unwrap()
-                    .iter()
-                    .find_map(|worker| {
-                        if worker.live_streamer.id == x.id {
-                            Some(format!("{:?}", *worker.downloader_status.read().unwrap()))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default(),
-                inner: x,
+                    .clone()
+                    .into_iter()
+                    .find(|worker| worker.live_streamer.id == x.id);
+                LiveStreamerResponse {
+                    status: option
+                        .as_ref()
+                        .map(|t| format!("{:?}", *t.downloader_status.read().unwrap()))
+                        .unwrap_or_default(),
+                    inner: x,
+                    upload_status: option
+                        .map(|t| format!("{:?}", *t.uploader_status.read().unwrap()))
+                        .unwrap_or_default(),
+                }
             })
             .collect(),
     ))
@@ -80,10 +96,10 @@ pub async fn post_streamers_endpoint(
         .await
         .map_err(report_to_response)?;
 
-    info!(workers=?service_register.workers, "successfully inserted new live streamers");
+    info!(workers=?live_streamers, "successfully inserted new live streamers");
     Ok(Json(live_streamers))
 }
-#[debug_handler(state = ServiceRegister)]
+
 pub async fn put_streamers_endpoint(
     State(service_register): State<ServiceRegister>,
     State(pool): State<ConnectionPool>,
@@ -127,8 +143,59 @@ pub async fn delete_streamers_endpoint(
         .await
         .map_err(report_to_response)?;
     let live_streamers = del_streamer(&pool, id).await.map_err(report_to_response)?;
-    info!(workers=?service_register.workers, "successfully inserted new live streamers");
+    info!(workers=?live_streamers, "successfully inserted new live streamers");
     Ok(Json(live_streamers))
+}
+
+#[axum::debug_handler(state = ServiceRegister)]
+pub async fn pause_streamers_endpoint(
+    State(service_register): State<ServiceRegister>,
+    State(pool): State<ConnectionPool>,
+    State(workers): State<Arc<RwLock<Vec<Arc<Worker>>>>>,
+    Path(id): Path<i64>,
+) -> Result<Json<()>, Response> {
+    let option = workers
+        .read()
+        .unwrap()
+        .clone()
+        .into_iter()
+        .find(|worker| worker.live_streamer.id == id);
+    if let Some(w) = option {
+        let manager = service_register
+            .get_manager(&w.live_streamer.url)
+            .ok_or(AppError::Unknown)
+            .map_err(report_to_response)?;
+        let monitor = manager.ensure_monitor(pool.clone());
+        let worker_status = w.downloader_status.read().unwrap().clone();
+        let d = match worker_status {
+            WorkerStatus::Working(d) => {
+                w.change_status(Stage::Download, WorkerStatus::Pause);
+                Some(d.clone())
+            }
+            WorkerStatus::Pending => {
+                monitor.rooms_handle.toggle(w.clone()).await;
+                w.change_status(Stage::Download, WorkerStatus::Pause);
+                None
+            }
+            WorkerStatus::Idle => {
+                monitor.rooms_handle.toggle(w.clone()).await;
+                w.change_status(Stage::Download, WorkerStatus::Pause);
+                None
+            }
+            WorkerStatus::Pause => {
+                monitor.rooms_handle.toggle(w.clone()).await;
+                w.change_status(Stage::Download, WorkerStatus::Idle);
+                None
+            }
+        };
+
+        if let Some(d) = d {
+            d.stop().await.map_err(report_to_response)?;
+        }
+        info!(workers=?&w.live_streamer.url, "successfully pause live streamers");
+    }
+
+    Ok(Json(()))
 }
 
 pub async fn get_configuration(
@@ -411,7 +478,7 @@ pub async fn get_videos() -> Result<Json<Vec<serde_json::Value>>, Response> {
     let mut index = 1;
 
     // **use tokio::fs::read_dir**
-    if let Ok(mut entries) = fs::read_dir("../../../../..").await {
+    if let Ok(mut entries) = fs::read_dir(".").await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             let file_name = entry.file_name().to_string_lossy().into_owned();
@@ -444,4 +511,80 @@ pub async fn get_videos() -> Result<Json<Vec<serde_json::Value>>, Response> {
         }
     }
     Ok(Json(file_list))
+}
+
+pub async fn get_status(
+    State(service_register): State<ServiceRegister>,
+    State(workers): State<Arc<RwLock<Vec<Arc<Worker>>>>>,
+    State(config): State<Arc<RwLock<Config>>>,
+    State(actor_handle): State<Arc<ActorHandle>>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let mut sw = Vec::new();
+    for worker in workers.read().unwrap().iter() {
+        sw.push(serde_json::json!({
+        "downloader_status": format!("{:?}", worker.downloader_status.read().unwrap()),
+        "uploader_status": format!("{:?}", worker.uploader_status.read().unwrap()),
+        "live_streamer": worker.live_streamer,
+        "upload_streamer": worker.upload_streamer,
+        }))
+    }
+
+    Ok(Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "rooms": sw,
+        "download_semaphore": actor_handle.d_kills.len(),
+        "update_semaphore": actor_handle.u_kills.len(),
+        "config": config,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct PostUploads {
+    files: Vec<PathBuf>,
+    params: UploadStreamer,
+}
+
+// #[debug_handler]
+pub async fn post_uploads(
+    State(config): State<Arc<RwLock<Config>>>,
+    Json(json_data): Json<PostUploads>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let upload_config = json_data.params;
+    let (line, limit, submit_api) = {
+        let config = config.read().unwrap();
+        let line = UploadLine::from_str(&config.lines, true).ok();
+        let limit = config.threads;
+        let submit_api = config.submit_api.clone();
+        (line, limit, submit_api)
+    };
+    info!("通过页面开始上传");
+    let (bilibili, videos) = upload(
+        upload_config
+            .user_cookie
+            .as_deref()
+            .unwrap_or("cookies.json"),
+        None,
+        line,
+        &json_data.files,
+        limit as usize,
+    )
+    .await
+    .map_err(report_to_response)?;
+    if !videos.is_empty() {
+        let recorder = Recorder::new(
+            upload_config.title.clone(),
+            &upload_config.template_name,
+            "stream_title",
+            "",
+            Local::now(),
+        );
+        let studio = build_studio(&upload_config, &bilibili, videos, recorder)
+            .await
+            .map_err(report_to_response)?;
+        let response_data = submit_to_bilibili(&bilibili, &studio, submit_api.as_deref())
+            .await
+            .map_err(report_to_response)?;
+        info!("通过页面上传成功 {:?}", response_data);
+    }
+    Ok(Json(serde_json::json!({})))
 }

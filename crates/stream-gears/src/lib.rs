@@ -45,10 +45,13 @@ fn init_tracing_with_rotation() {
         // 按日期滚动，每天创建新文件
         let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
             .rotation(Rotation::DAILY) // rotate log files once every hour
+            .rotation(Rotation::NEVER) // rotate log files once every hour
             .filename_prefix("biliup") // log file names will be prefixed with `myapp.`
+            .filename_prefix("download") // log file names will be prefixed with `myapp.`
             .filename_suffix("log") // log file names will be suffixed with `.log`
-            .max_log_files(3)
-            .build("logs") // try to build an appender that stores log files in `/var/log`
+            // .max_log_files(3)
+            // .build("logs") // try to build an appender that stores log files in `/var/log`
+            .build("") // try to build an appender that stores log files in `/var/log`
             .expect("initializing rolling file appender failed");
         // 或者按小时滚动
         // let file_appender = tracing_appender::rolling::hourly("logs", "upload.log");
@@ -413,7 +416,7 @@ fn upload(
             let studio_pre = StudioPre::builder()
                 .video_path(video_path)
                 .cookie_file(cookie_file)
-                .line(line)
+                .maybe_line(line)
                 .limit(limit)
                 .title(title)
                 .tid(tid)
@@ -423,7 +426,7 @@ fn upload(
                 .desc(desc)
                 .dynamic(dynamic)
                 .cover(cover)
-                .dtime(dtime)
+                .maybe_dtime(dtime)
                 .dolby(dolby)
                 .lossless_music(lossless_music)
                 .no_reprint(no_reprint)
@@ -432,7 +435,7 @@ fn upload(
                 .up_selection_reply(up_selection_reply)
                 .up_close_danmu(up_close_danmu)
                 .desc_v2_credit(desc_v2)
-                .extra_fields(Some(parse_extra_fields(extra_fields)))
+                .extra_fields(parse_extra_fields(extra_fields))
                 .build();
 
             // let submit = match submit {

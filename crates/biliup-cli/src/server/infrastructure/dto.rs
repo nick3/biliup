@@ -1,5 +1,5 @@
 use crate::server::infrastructure::context::WorkerStatus;
-use crate::server::infrastructure::models::LiveStreamer;
+use crate::server::infrastructure::models::live_streamer::LiveStreamer;
 use serde::{Deserialize, Serialize};
 
 /// 直播主播响应数据传输对象
@@ -12,4 +12,6 @@ pub struct LiveStreamerResponse {
 
     /// 当前工作状态
     pub status: String,
+    /// 上传状态
+    pub upload_status: String,
 }

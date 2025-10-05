@@ -1,21 +1,28 @@
-use crate::server::core::download_manager::UActor;
-use crate::server::core::downloader::SegmentEvent;
+use crate::UploadLine;
+use crate::server::common::util::Recorder;
+use crate::server::core::downloader::{SegmentEvent, SegmentInfo};
 use crate::server::errors::{AppError, AppResult};
-use crate::server::infrastructure::context::Worker;
-use crate::server::infrastructure::models::UploadStreamer;
+use crate::server::infrastructure::context::{Context, Stage, Worker, WorkerStatus};
+use crate::server::infrastructure::models::InsertFileItem;
 use crate::server::infrastructure::models::hook_step::process_video;
+use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use async_channel::Receiver;
-use biliup::bilibili::{BiliBili, ResponseData, Studio, Video};
+use biliup::bilibili::{BiliBili, Credit, ResponseData, Studio, Video};
 use biliup::client::StatelessClient;
 use biliup::credential::login_by_cookies;
+use biliup::error::Kind;
 use biliup::uploader::line::{Line, Probe};
 use biliup::uploader::util::SubmitOption;
 use biliup::uploader::{VideoFile, line};
+use chrono::Local;
 use error_stack::ResultExt;
 use futures::StreamExt;
+use futures::stream::Inspect;
+use ormlite::Insert;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
+use tokio::pin;
 use tracing::{error, info};
 
 // 辅助结构体
@@ -33,26 +40,40 @@ struct UploadedVideos {
     paths: Vec<PathBuf>,
 }
 
-pub async fn process_with_upload(
-    first_event: SegmentEvent,
-    rx: Receiver<SegmentEvent>,
-    worker: &Worker,
+pub async fn process_with_upload<F>(
+    rx: Inspect<Receiver<SegmentInfo>, F>,
+    ctx: &Context,
     upload_config: UploadStreamer,
-) -> AppResult<()> {
+) -> AppResult<()>
+where
+    F: FnMut(&SegmentInfo),
+{
+    info!(upload_config=?upload_config, "Starting process with upload");
     // 1. 初始化上传环境
-    let upload_context = initialize_upload_context(&worker, upload_config).await?;
+    let upload_context = initialize_upload_context(&ctx.worker, upload_config).await?;
 
     // 2. 流水线处理视频上传
-    let uploaded_videos = pipeline_upload_videos(first_event, rx, &upload_context).await?;
+    let uploaded_videos = pipeline_upload_videos(rx, &upload_context).await?;
 
     // 3. 提交到B站
     if !uploaded_videos.videos.is_empty() {
-        submit_to_bilibili(&upload_context, uploaded_videos.videos, &worker).await?;
+        let mut recorder = ctx.recorder.clone();
+        recorder.filename_prefix = upload_context.upload_config.title.clone();
+
+        let studio = build_studio(
+            &upload_context.upload_config,
+            &upload_context.bilibili,
+            uploaded_videos.videos,
+            recorder,
+        )
+        .await?;
+        let submit_api = ctx.worker.config.read().unwrap().submit_api.clone();
+        submit_to_bilibili(&upload_context.bilibili, &studio, submit_api.as_deref()).await?;
     }
 
     // 4. 执行后处理
     if !uploaded_videos.paths.is_empty() {
-        execute_postprocessor(uploaded_videos.paths, &worker).await?;
+        execute_postprocessor(uploaded_videos.paths, &ctx).await?;
     }
 
     Ok(())
@@ -97,13 +118,15 @@ async fn get_upload_line(client: &StatelessClient, line: &str) -> AppResult<Line
     Ok(line)
 }
 
-async fn pipeline_upload_videos(
-    first_event: SegmentEvent,
-    rx: Receiver<SegmentEvent>,
+async fn pipeline_upload_videos<F>(
+    mut rx: Inspect<Receiver<SegmentInfo>, F>,
     context: &UploadContext,
-) -> AppResult<UploadedVideos> {
+) -> AppResult<UploadedVideos>
+where
+    F: FnMut(&SegmentInfo),
+{
     // let mut desc_v2 = Vec::new();
-    // for credit in desc_v2_credit {
+    // for credit in context.upload_config.desc_v2_credit {
     //     desc_v2.push(Credit {
     //         type_id: credit.type_id,
     //         raw_text: credit.raw_text,
@@ -112,17 +135,12 @@ async fn pipeline_upload_videos(
     // }
 
     let mut uploaded = UploadedVideos::default();
-
-    // 处理第一个事件
-    let video = upload_single_file(&first_event.file_path, context).await?;
-    uploaded.videos.push(video);
-    uploaded.paths.push(first_event.file_path);
-
+    pin!(rx);
     // 流式处理后续事件
-    while let Ok(event) = rx.recv().await {
-        let video = upload_single_file(&event.file_path, context).await?;
+    while let Some(event) = rx.next().await {
+        let video = upload_single_file(&event.prev_file_path, context).await?;
         uploaded.videos.push(video);
-        uploaded.paths.push(event.file_path);
+        uploaded.paths.push(event.prev_file_path);
         // 失败的文件不加入路径列表，避免后处理出错
     }
 
@@ -136,14 +154,14 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
     let line = &context.line;
     let video_path = file_path;
 
-    println!(
-        "{:?}",
+    info!(
+        "开始上传文件：{:?}",
         video_path
             .canonicalize()
             .change_context(AppError::Unknown)?
             .to_str()
     );
-    info!("{line:?}");
+    info!("线路选择：{line:?}");
     let video_file = VideoFile::new(video_path).change_context(AppError::Unknown)?;
     let total_size = video_file.total_size;
     let file_name = video_file.file_name.clone();
@@ -173,12 +191,11 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
     Ok(video)
 }
 
-async fn submit_to_bilibili(
-    context: &UploadContext,
-    videos: Vec<Video>,
-    worker: &Worker,
+pub async fn submit_to_bilibili(
+    bilibili: &BiliBili,
+    studio: &Studio,
+    submit_api: Option<&str>,
 ) -> AppResult<ResponseData> {
-    let studio = build_studio(context, videos).await?;
     // let submit = match worker.config.read().unwrap().submit_api {
     //     Some(submit) => SubmitOption::from_str(&submit).unwrap_or(SubmitOption::App),
     //     _ => SubmitOption::App,
@@ -191,23 +208,17 @@ async fn submit_to_bilibili(
     //     _ => bilibili.submit_by_app(&studio, None).await,
     // };
 
-    let submit_option = worker
-        .config
-        .read()
-        .unwrap()
-        .submit_api
-        .as_deref()
-        .and_then(|s| SubmitOption::from_str(s).ok())
-        .unwrap_or(SubmitOption::App);
+    let submit_option = match submit_api {
+        Some(submit) => SubmitOption::from_str(submit).unwrap_or(SubmitOption::App),
+        _ => SubmitOption::App,
+    };
 
     let result = match submit_option {
-        SubmitOption::BCutAndroid => context
-            .bilibili
+        SubmitOption::BCutAndroid => bilibili
             .submit_by_bcut_android(&studio, None)
             .await
             .change_context(AppError::Unknown)?,
-        _ => context
-            .bilibili
+        _ => bilibili
             .submit_by_app(&studio, None)
             .await
             .change_context(AppError::Unknown)?,
@@ -216,19 +227,23 @@ async fn submit_to_bilibili(
     Ok(result)
 }
 
-async fn build_studio(context: &UploadContext, videos: Vec<Video>) -> AppResult<Studio> {
-    let upload_config = &context.upload_config;
+pub(crate) async fn build_studio(
+    upload_config: &UploadStreamer,
+    bilibili: &BiliBili,
+    videos: Vec<Video>,
+    recorder: Recorder,
+) -> AppResult<Studio> {
     // 使用 Builder 模式简化构建
     let mut studio: Studio = Studio::builder()
-        .desc(upload_config.description.clone().unwrap_or_default())
-        .dtime(upload_config.dtime)
-        .copyright(upload_config.copyright.unwrap_or(2))
+        .desc(recorder.format(&upload_config.description.clone().unwrap_or_default()))
+        .maybe_dtime(upload_config.dtime)
+        .maybe_copyright(upload_config.copyright)
         .cover(upload_config.cover_path.clone().unwrap_or_default())
         .dynamic(upload_config.dynamic.clone().unwrap_or_default())
         .source(upload_config.copyright_source.clone().unwrap_or_default())
         .tag(upload_config.tags.join(","))
-        .tid(upload_config.tid.unwrap_or(171))
-        .title(upload_config.title.clone().unwrap_or_default())
+        .maybe_tid(upload_config.tid)
+        .title(recorder.format_filename())
         .videos(videos)
         .dolby(upload_config.dolby.unwrap_or_default())
         // .lossless_music(upload_config.)
@@ -237,7 +252,7 @@ async fn build_studio(context: &UploadContext, videos: Vec<Video>) -> AppResult<
         .up_close_reply(upload_config.up_close_reply.unwrap_or_default())
         .up_selection_reply(upload_config.up_selection_reply.unwrap_or_default())
         .up_close_danmu(upload_config.up_close_danmu.unwrap_or_default())
-        .desc_v2(None)
+        .maybe_desc_v2(None)
         .extra_fields(
             serde_json::from_str(&upload_config.extra_fields.clone().unwrap_or_default())
                 .unwrap_or_default(), // 处理额外字段
@@ -245,8 +260,8 @@ async fn build_studio(context: &UploadContext, videos: Vec<Video>) -> AppResult<
         .build();
     // 处理封面上传
     if !studio.cover.is_empty()
-        && let Ok(c) = &std::fs::read(&studio.cover).map_err(|e| error!(e=?e))
-        && let Ok(url) = context.bilibili.cover_up(c).await.map_err(|e| error!(e=?e))
+        && let Ok(c) = &std::fs::read(&studio.cover).inspect_err(|e| error!(e=?e))
+        && let Ok(url) = bilibili.cover_up(c).await.inspect_err(|e| error!(e=?e))
     {
         studio.cover = url;
     };
@@ -254,10 +269,164 @@ async fn build_studio(context: &UploadContext, videos: Vec<Video>) -> AppResult<
     Ok(studio)
 }
 
-pub async fn execute_postprocessor(video_paths: Vec<PathBuf>, worker: &Worker) -> AppResult<()> {
-    if let Some(processor) = worker.get_streamer().postprocessor {
+pub async fn execute_postprocessor(video_paths: Vec<PathBuf>, ctx: &Context) -> AppResult<()> {
+    if let Some(processor) = ctx.worker.get_streamer().postprocessor {
         let paths: Vec<&Path> = video_paths.iter().map(|p| p.as_path()).collect();
         process_video(&paths, &processor).await?;
     }
     Ok(())
+}
+
+pub async fn upload(
+    cookie_file: impl AsRef<Path>,
+    proxy: Option<&str>,
+    line: Option<UploadLine>,
+    video_paths: &[PathBuf],
+    limit: usize,
+) -> AppResult<(BiliBili, Vec<Video>)> {
+    let bilibili = login_by_cookies(&cookie_file, proxy).await;
+    let bilibili = match bilibili {
+        Err(Kind::IO(_)) => bilibili.change_context_lazy(|| {
+            AppError::Custom(format!(
+                "open cookies file: {}",
+                &cookie_file.as_ref().to_string_lossy()
+            ))
+        })?,
+        _ => bilibili.change_context_lazy(|| AppError::Unknown)?,
+    };
+
+    let client = StatelessClient::default();
+    let mut videos = Vec::new();
+    let line = match line {
+        Some(UploadLine::Bldsa) => line::bldsa(),
+        Some(UploadLine::Cnbldsa) => line::cnbldsa(),
+        Some(UploadLine::Andsa) => line::andsa(),
+        Some(UploadLine::Atdsa) => line::atdsa(),
+        Some(UploadLine::Bda2) => line::bda2(),
+        Some(UploadLine::Cnbd) => line::cnbd(),
+        Some(UploadLine::Anbd) => line::anbd(),
+        Some(UploadLine::Atbd) => line::atbd(),
+        Some(UploadLine::Tx) => line::tx(),
+        Some(UploadLine::Cntx) => line::cntx(),
+        Some(UploadLine::Antx) => line::antx(),
+        Some(UploadLine::Attx) => line::attx(),
+        // Some(UploadLine::Bda) => line::bda(),
+        Some(UploadLine::Txa) => line::txa(),
+        Some(UploadLine::Alia) => line::alia(),
+        _ => Probe::probe(&client.client).await.unwrap_or_default(),
+    };
+    for video_path in video_paths {
+        println!(
+            "{:?}",
+            video_path
+                .canonicalize()
+                .change_context_lazy(|| AppError::Unknown)?
+                .to_str()
+        );
+        info!("{line:?}");
+        let video_file = VideoFile::new(&video_path).change_context_lazy(|| AppError::Unknown)?;
+        let total_size = video_file.total_size;
+        let file_name = video_file.file_name.clone();
+        let uploader = line
+            .pre_upload(&bilibili, video_file)
+            .await
+            .change_context_lazy(|| AppError::Unknown)?;
+
+        let instant = Instant::now();
+
+        let video = uploader
+            .upload(client.clone(), limit, |vs| {
+                vs.map(|vs| {
+                    let chunk = vs?;
+                    let len = chunk.len();
+                    Ok((chunk, len))
+                })
+            })
+            .await
+            .change_context_lazy(|| AppError::Unknown)?;
+        let t = instant.elapsed().as_millis();
+        info!(
+            "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
+            t as f64 / 1000.,
+            total_size as f64 / 1000. / t as f64
+        );
+        videos.push(video);
+    }
+
+    Ok((bilibili, videos))
+}
+
+/// 上传Actor
+/// 负责处理上传相关的消息和任务
+pub struct UActor {
+    /// 上传消息接收器
+    receiver: Receiver<UploaderMessage>,
+}
+
+impl UActor {
+    /// 创建新的上传Actor实例
+    pub fn new(receiver: Receiver<UploaderMessage>) -> Self {
+        Self { receiver }
+    }
+
+    /// 运行Actor主循环，处理接收到的消息
+    pub(crate) async fn run(&mut self) {
+        while let Ok(msg) = self.receiver.recv().await {
+            self.handle_message(msg).await;
+        }
+    }
+
+    /// 处理上传消息
+    ///
+    /// # 参数
+    /// * `msg` - 要处理的上传消息
+    async fn handle_message(&mut self, msg: UploaderMessage) {
+        match msg {
+            UploaderMessage::SegmentEvent(rx, ctx) => {
+                ctx.worker
+                    .change_status(Stage::Upload, WorkerStatus::Pending);
+                let inspect = rx.inspect(|f| {
+                    let pool = ctx.pool.clone();
+                    let streamer_info_id = ctx.stream_info.streamer_info.id;
+                    let file = f.prev_file_path.display().to_string();
+                    tokio::spawn(async move {
+                        let result = InsertFileItem {
+                            file,
+                            streamer_info_id,
+                        }
+                        .insert(&pool)
+                        .await;
+                        info!(result=?result, "Insert file");
+                    });
+                });
+                let result = match ctx.worker.get_upload_config() {
+                    Some(config) => process_with_upload(inspect, &ctx, config).await,
+                    None => {
+                        let mut paths = Vec::new();
+                        pin!(inspect);
+                        while let Some(event) = inspect.next().await {
+                            paths.push(event.prev_file_path);
+                        }
+                        // 无上传配置时，直接执行后处理
+                        execute_postprocessor(paths, &ctx).await
+                    }
+                };
+
+                if let Err(e) = &result {
+                    error!("Process segment event failed: {}", e);
+                    // 可以添加错误通知机制
+                }
+                info!(url=ctx.stream_info.streamer_info.url, result=?result, "后处理执行完毕：Finished processing segment event");
+                ctx.worker.change_status(Stage::Upload, WorkerStatus::Idle);
+            }
+        }
+    }
+}
+
+/// 上传消息枚举
+/// 定义上传Actor可以处理的消息类型
+#[derive(Debug)]
+pub enum UploaderMessage {
+    /// 分段事件消息，包含事件、接收器和工作器
+    SegmentEvent(Receiver<SegmentInfo>, Context),
 }
