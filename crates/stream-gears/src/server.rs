@@ -1,6 +1,9 @@
-use crate::{DanmakuClient, construct_headers};
+use crate::DanmakuClient;
 use async_trait::async_trait;
 use biliup::downloader::util::Segmentable;
+use biliup::uploader::util::SubmitOption;
+use biliup_cli::cli::{Cli, Commands};
+use biliup_cli::downloader::generate_json;
 use biliup_cli::server::app::ApplicationController;
 use biliup_cli::server::common::util::{Recorder, media_ext_from_url, parse_time};
 use biliup_cli::server::config::{Config, default_segment_time};
@@ -11,15 +14,16 @@ use biliup_cli::server::core::downloader::{DownloadConfig, Downloader, Downloade
 use biliup_cli::server::core::plugin::{DownloadPlugin, StreamInfoExt, StreamStatus};
 use biliup_cli::server::errors::{AppError, AppResult};
 use biliup_cli::server::infrastructure::connection_pool::ConnectionManager;
-use biliup_cli::server::infrastructure::context::{Context, Worker};
+use biliup_cli::server::infrastructure::context::Context;
 use biliup_cli::server::infrastructure::models::StreamerInfo;
 use biliup_cli::server::infrastructure::repositories;
 use biliup_cli::server::infrastructure::repositories::get_upload_config;
 use biliup_cli::server::infrastructure::service_register::ServiceRegister;
-use chrono::{DateTime, Local, NaiveDateTime, Utc};
+use biliup_cli::uploader::{append, list, login, renew, show, upload_by_command, upload_by_config};
+use chrono::Utc;
+use clap::Parser;
 use error_stack::{Report, ResultExt};
 use fancy_regex::Regex;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::PyDictMethods;
 use pyo3::prelude::{PyAnyMethods, PyListMethods, PyModule};
 use pyo3::types::PyDict;
@@ -32,8 +36,12 @@ use std::net::ToSocketAddrs;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
-use time::OffsetDateTime;
+use time::macros::format_description;
 use tracing::{debug, info};
+use tracing_appender::rolling::Rotation;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Debug)]
 pub struct PyPlugin {
@@ -82,51 +90,11 @@ impl DownloadPlugin for PyPlugin {
                         Arc::new(DanmakuClient::new(Arc::new(danmaku))) as Arc<dyn Downloader>;
                     ctx.extension.insert(danmaku);
                 }
-                Ok(StreamStatus::Live { stream_info: info })
+                Ok(StreamStatus::Live {
+                    stream_info: Box::new(info),
+                })
             }
             None => Ok(StreamStatus::Offline),
-        }
-    }
-
-    async fn create_downloader(
-        &self,
-        stream_info: &StreamInfoExt,
-        // worker: &Worker,
-        config: Config,
-        recorder: Recorder,
-    ) -> Arc<dyn Downloader> {
-        let raw_stream_url = &stream_info.raw_stream_url;
-        match config.downloader {
-            Some(DownloaderType::Ffmpeg) => {
-                let config = DownloadConfig {
-                    segment_time: config.segment_time.or_else(default_segment_time),
-                    file_size: Some(config.file_size), // 2GB
-                    headers: stream_info.stream_headers.clone(),
-                    recorder: recorder,
-                    // output_dir: PathBuf::from("./downloads")
-                    output_dir: PathBuf::from("."),
-                };
-
-                Arc::new(FfmpegDownloader::new(
-                    raw_stream_url,
-                    config,
-                    Vec::new(),
-                    DownloaderType::FfmpegInternal,
-                ))
-            }
-            // Some(DownloaderType::StreamGears) => {
-            //
-            // },
-            _ => Arc::new(StreamGears::new(
-                raw_stream_url,
-                construct_headers(&stream_info.stream_headers),
-                recorder.filename_template(),
-                Segmentable::new(
-                    config.segment_time.as_deref().map(parse_time),
-                    Some(config.file_size),
-                ),
-                None,
-            )),
         }
     }
 
@@ -195,12 +163,12 @@ pub fn from_py(actor_handle: Arc<ActorHandle>) -> PyResult<Vec<DownloadManager>>
 
         // 如果要获取类属性（而不是实例属性）
         let bound = plugin_class.getattr("download_plugins")?;
-        let plugin_list: &Bound<PyList> = bound.downcast()?;
+        let plugin_list: &Bound<PyList> = bound.cast()?;
 
         plugin_list
             .iter()
             .map(|x| {
-                let download = x.downcast::<PyType>()?;
+                let download = x.cast::<PyType>()?;
                 let py_plugin = PyPlugin::from_pytype(download)?;
                 Ok(DownloadManager::new(py_plugin, actor_handle.clone()))
             })
@@ -308,7 +276,7 @@ impl ConfigState {
                 return Ok(d);
             }
             // 尝试转换为字典并过滤
-            return match bound.downcast::<PyDict>() {
+            return match bound.cast::<PyDict>() {
                 Ok(dict) => {
                     let filtered = PyDict::new(py);
                     dict.iter()
@@ -349,44 +317,179 @@ fn cfg_arc() -> &'static Arc<RwLock<Config>> {
 }
 
 #[tokio::main]
-pub(crate) async fn _main() -> AppResult<()> {
-    info!(
-        "environment loaded and configuration parsed, initializing Postgres connection and running migrations..."
-    );
-    let conn_pool = ConnectionManager::new_pool("data/data.sqlite3")
-        .await
-        .expect("could not initialize the database connection pool");
+pub(crate) async fn _main(args: &[String]) -> AppResult<()> {
+    let cli = match Cli::try_parse_from(args) {
+        Ok(res) => res,
+        Err(e) => e.exit(),
+    };
 
-    *CONFIG.write().unwrap() = repositories::get_config(&conn_pool).await?;
-    let actor_handle = Arc::new(ActorHandle::new(
-        CONFIG.read().unwrap().pool1_size,
-        CONFIG.read().unwrap().pool2_size,
+    let local_time = tracing_subscriber::fmt::time::LocalTime::new(format_description!(
+        "[year]-[month]-[day] [hour]:[minute]:[second]"
     ));
-    let vec = from_py(actor_handle.clone()).unwrap();
+    // 按日期滚动，每天创建新文件
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(Rotation::DAILY) // rotate log files once every hour
+        .rotation(Rotation::NEVER) // rotate log files once every hour
+        .filename_prefix("biliup") // log file names will be prefixed with `myapp.`
+        .filename_prefix("download") // log file names will be prefixed with `myapp.`
+        .filename_suffix("log") // log file names will be suffixed with `.log`
+        // .max_log_files(3)
+        // .build("logs") // try to build an appender that stores log files in `/var/log`
+        .build("") // try to build an appender that stores log files in `/var/log`
+        .expect("initializing rolling file appender failed");
+    // 或者按小时滚动
+    // let file_appender = tracing_appender::rolling::hourly("logs", "upload.log");
 
-    let service_register = ServiceRegister::new(conn_pool, CONFIG.clone(), actor_handle, vec);
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let all_streamer = repositories::get_all_streamer(&service_register.pool).await?;
+    let subscriber = tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        // 控制台输出
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_timer(local_time.clone())
+                .with_file(true) // 打印文件名
+                .with_line_number(true)
+                .with_thread_ids(true),
+        )
+        // 文件输出
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_timer(local_time)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_ansi(false), // .json() // 可选：使用 JSON 格式便于解析
+        );
 
-    for streamer in all_streamer {
-        // workers.push(Arc::new(Worker::new(streamer.id, service_register.pool.clone())));
-        if let Some(manager) = service_register.get_manager(&streamer.url) {
-            let upload_config = get_upload_config(&service_register.pool, streamer.id).await?;
-            let _ = service_register
-                .add_room(&manager, streamer, upload_config)
-                .await?;
-        };
-    }
+    subscriber.init();
 
-    info!("migrations successfully ran, initializing axum server...");
-    let addr = ("0.0.0.0", 19159);
-    let addr = addr
-        .to_socket_addrs()
-        .change_context(AppError::Unknown)?
-        .next()
-        .unwrap();
-    ApplicationController::serve(&addr, service_register)
-        .await
-        .attach("could not initialize application routes")?;
+    info!("Tracing initialized with daily rotation");
+
+    match cli.command {
+        Commands::Login => login(cli.user_cookie, cli.proxy.as_deref()).await?,
+        Commands::Renew => {
+            renew(cli.user_cookie, cli.proxy.as_deref()).await?;
+        }
+        Commands::Upload {
+            video_path,
+            config: None,
+            line,
+            limit,
+            studio,
+            submit,
+        } => {
+            upload_by_command(
+                studio,
+                cli.user_cookie,
+                video_path,
+                line,
+                limit,
+                submit.unwrap_or(SubmitOption::App),
+                cli.proxy.as_deref(),
+            )
+            .await?
+        }
+        Commands::Upload {
+            video_path: _,
+            config: Some(config),
+            submit,
+            ..
+        } => {
+            upload_by_config(config, cli.user_cookie, submit, cli.proxy.as_deref()).await?;
+        }
+        Commands::Append {
+            video_path,
+            vid,
+            line,
+            limit,
+            studio: _,
+            submit,
+        } => {
+            append(
+                cli.user_cookie,
+                vid,
+                video_path,
+                line,
+                limit,
+                submit.unwrap_or(SubmitOption::App),
+                cli.proxy.as_deref(),
+            )
+            .await?
+        }
+        Commands::Show { vid } => show(cli.user_cookie, vid, cli.proxy.as_deref()).await?,
+        Commands::DumpFlv { file_name } => generate_json(file_name)?,
+        Commands::Download {
+            url,
+            output,
+            split_size,
+            split_time,
+        } => biliup_cli::downloader::download(&url, output, split_size, split_time).await?,
+        Commands::Server { bind, port, auth } => {
+            info!(
+                "environment loaded and configuration parsed, initializing Postgres connection and running migrations..."
+            );
+            let conn_pool = ConnectionManager::new_pool("data/data.sqlite3")
+                .await
+                .expect("could not initialize the database connection pool");
+
+            *CONFIG.write().unwrap() = repositories::get_config(&conn_pool).await?;
+            let actor_handle = Arc::new(ActorHandle::new(
+                CONFIG.read().unwrap().pool1_size,
+                CONFIG.read().unwrap().pool2_size,
+            ));
+            let vec = from_py(actor_handle.clone()).unwrap();
+
+            let service_register =
+                ServiceRegister::new(conn_pool, CONFIG.clone(), actor_handle, vec);
+
+            let all_streamer = repositories::get_all_streamer(&service_register.pool).await?;
+
+            for streamer in all_streamer {
+                // workers.push(Arc::new(Worker::new(streamer.id, service_register.pool.clone())));
+                if let Some(manager) = service_register.get_manager(&streamer.url) {
+                    let upload_config =
+                        get_upload_config(&service_register.pool, streamer.id).await?;
+                    let _ = service_register
+                        .add_room(manager, streamer, upload_config)
+                        .await?;
+                };
+            }
+
+            info!("migrations successfully ran, initializing axum server...");
+            let addr = (bind, port);
+            let addr = addr
+                .to_socket_addrs()
+                .change_context(AppError::Unknown)?
+                .next()
+                .unwrap();
+            ApplicationController::serve(&addr, auth, service_register)
+                .await
+                .attach("could not initialize application routes")?;
+            // biliup_cli::run((&bind, port)).await?
+        }
+        Commands::List {
+            is_pubing,
+            pubed,
+            not_pubed,
+            from_page,
+            max_pages,
+        } => {
+            list(
+                cli.user_cookie,
+                is_pubing,
+                pubed,
+                not_pubed,
+                cli.proxy.as_deref(),
+                from_page,
+                max_pages,
+            )
+            .await?
+        }
+    };
+
     Ok(())
 }

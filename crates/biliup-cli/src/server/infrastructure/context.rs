@@ -2,17 +2,13 @@ use crate::server::common::util::Recorder;
 use crate::server::config::Config;
 use crate::server::core::downloader::Downloader;
 use crate::server::core::plugin::StreamInfoExt;
-use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::models::live_streamer::LiveStreamer;
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
-use crate::server::infrastructure::repositories::{get_config, get_streamer};
 use axum::http::Extensions;
 use biliup::client::StatelessClient;
 use core::fmt;
-use error_stack::ResultExt;
 use ormlite::Model;
-use serde::{Deserialize, Serialize, Serializer};
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
@@ -48,7 +44,7 @@ impl Context {
 #[derive(Debug)]
 pub struct Worker {
     /// 下载器状态
-    pub downloader_status: RwLock<WorkerStatus>,
+    pub downloader_status: tokio::sync::RwLock<WorkerStatus>,
     /// 上传器状态
     pub uploader_status: RwLock<WorkerStatus>,
     /// 直播主播信息
@@ -76,7 +72,7 @@ impl Worker {
         client: StatelessClient,
     ) -> Self {
         Self {
-            downloader_status: RwLock::new(Default::default()),
+            downloader_status: tokio::sync::RwLock::new(Default::default()),
             uploader_status: Default::default(),
             live_streamer,
             upload_streamer,
@@ -108,10 +104,10 @@ impl Worker {
     /// # 参数
     /// * `stage` - 工作阶段（下载或上传）
     /// * `status` - 新的工作状态
-    pub fn change_status(&self, stage: Stage, status: WorkerStatus) {
+    pub async fn change_status(&self, stage: Stage, status: WorkerStatus) {
         match stage {
             Stage::Download => {
-                *self.downloader_status.write().unwrap() = status;
+                *self.downloader_status.write().await = status;
             }
             Stage::Upload => {
                 *self.uploader_status.write().unwrap() = status;

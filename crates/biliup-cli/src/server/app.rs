@@ -19,14 +19,18 @@ use tower_http::cors::{AllowMethods, CorsLayer};
 use tower_sessions::cookie::Key;
 use tower_sessions::{ExpiredDeletion, Expiry, SessionManagerLayer};
 use tower_sessions_sqlx_store::SqliteStore;
-use tracing::info;
+use tracing::{error, info};
 
 /// 应用程序控制器，负责启动和管理Web服务器
 pub struct ApplicationController;
 
 impl ApplicationController {
     /// 启动Web服务器
-    pub async fn serve(addr: &SocketAddr, service_register: ServiceRegister) -> AppResult<()> {
+    pub async fn serve(
+        addr: &SocketAddr,
+        enable_login_guard: bool,
+        service_register: ServiceRegister,
+    ) -> AppResult<()> {
         // 会话层配置
         // 使用 tower-sessions 建立会话层，将会话作为请求扩展提供
         let session_store = SqliteStore::new(service_register.pool.clone());
@@ -48,6 +52,7 @@ impl ApplicationController {
         // 配置会话管理层
         let session_layer = SessionManagerLayer::new(session_store)
             .with_secure(false)
+            .with_name("biliup.sid")
             .with_expiry(Expiry::OnInactivity(Duration::days(7)));
         // .with_signed(key);
 
@@ -57,7 +62,7 @@ impl ApplicationController {
         let auth_layer = AuthManagerLayerBuilder::new(backend, session_layer).build();
 
         // 构建应用程序路由
-        let enable_login_guard = true; // 是否启用登录保护
+        // 是否启用登录保护
         let mut app = server::router::router(service_register);
         if enable_login_guard {
             app = app
@@ -93,10 +98,24 @@ impl ApplicationController {
             .attach("error while starting API server")?;
 
         // 等待会话清理任务完成
-        deletion_task
-            .await
-            .change_context(AppError::Unknown)?
-            .change_context(AppError::Unknown)?;
+        match deletion_task.await {
+            Ok(Ok(val)) => { /* 正常完成 */ }
+            Ok(Err(e)) => {
+                // 真正业务错误
+                return Err(e).change_context(AppError::Unknown);
+            }
+            Err(join_err) if join_err.is_cancelled() => {
+                info!("Deletion task cancelled on shutdown");
+            }
+            Err(join_err) if join_err.is_panic() => {
+                error!("Deletion task panicked: {join_err}");
+                return Err(AppError::Unknown.into());
+            }
+            Err(join_err) => {
+                error!("Join error: {join_err}");
+                return Err(AppError::Unknown.into());
+            }
+        }
 
         Ok(())
     }

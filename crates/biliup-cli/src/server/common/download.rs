@@ -1,13 +1,11 @@
 use crate::server::common::upload::UploaderMessage;
-use crate::server::common::util::Recorder;
 use crate::server::core::downloader::{DownloadStatus, Downloader, SegmentEvent, SegmentInfo};
 use crate::server::core::monitor::RoomsHandle;
-use crate::server::core::plugin::{DownloadPlugin, StreamInfoExt};
+use crate::server::core::plugin::{DownloadPlugin, StreamStatus};
 use crate::server::errors::{AppError, AppResult};
-use crate::server::infrastructure::context::{Context, Stage, Worker, WorkerStatus};
+use crate::server::infrastructure::context::{Context, Worker, WorkerStatus};
 use async_channel::{Receiver, Sender};
-use chrono::Local;
-use error_stack::{FutureExt, ResultExt, bail};
+use error_stack::{ResultExt, bail, Report};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -46,36 +44,41 @@ impl DownloadGuard {
         rooms_handle: Arc<RoomsHandle>,
         downloader: Arc<dyn Downloader + Send + Sync>,
     ) -> Self {
-        // 更新工作器状态为工作中
-        worker.change_status(Stage::Download, WorkerStatus::Working(downloader.clone()));
         Self {
             worker,
             danmaku_client,
             rooms_handle,
         }
     }
-}
 
-impl Drop for DownloadGuard {
-    fn drop(&mut self) {
+    async fn cleanup(&mut self) {
         // 异步清理任务
         let danmaku = self.danmaku_client.clone();
         let rooms_handle = self.rooms_handle.clone();
         let worker = self.worker.clone();
 
-        tokio::spawn(async move {
-            if let Some(client) = danmaku {
-                if let Err(e) = client.stop().await {
-                    error!("Error stopping danmaku client: {}", e);
-                }
-            }
-            if let WorkerStatus::Pause = *worker.downloader_status.read().unwrap() {
-            } else {
-                // 确保状态更新和资源清理
-                worker.change_status(Stage::Download, WorkerStatus::Idle);
-                rooms_handle.toggle(worker).await;
-            };
-        });
+        if let Some(client) = danmaku
+            && let Err(e) = client.stop().await
+        {
+            error!("Error stopping danmaku client: {}", e);
+        }
+
+        // 确保状态更新和资源清理
+        rooms_handle
+            .toggle(worker.clone(), WorkerStatus::Idle)
+            .await;
+        info!(
+            "{} => {:?}",
+            worker.live_streamer.url,
+            worker.downloader_status.read().await
+        );
+    }
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        let worker = self.worker.clone();
+        info!("{}完成资源清理", worker.live_streamer.url);
     }
 }
 
@@ -213,27 +216,29 @@ impl SegmentEventProcessor {
         move |event| {
             match event {
                 SegmentEvent::Start { next_file_path } => {
+                    unreachable!("应没有任何位置发出此事件");
+                    // 开始下载时，获取到的是将要下载的文件名，此时文件还未生成
                     // 触发弹幕滚动保存
-                    if let Some(ref client) = danmaku {
-                        if let Err(e) = client
+                    if let Some(ref client) = danmaku
+                        && let Err(e) = client
                             .rolling(&next_file_path.with_extension("xml").display().to_string())
-                        {
-                            error!("Danmaku rolling error: {}", e);
-                        }
+                    {
+                        error!("Danmaku rolling error: {}", e);
                     }
                 }
                 SegmentEvent::Segment(event) => {
+                    // 分段时，获取到的是已下载的文件名
                     // 触发弹幕滚动保存
-                    if let Some(ref client) = danmaku {
-                        if let Err(e) = client.rolling(
+                    if let Some(ref client) = danmaku
+                        && let Err(e) = client.rolling(
                             &event
                                 .prev_file_path
                                 .with_extension("xml")
                                 .display()
                                 .to_string(),
-                        ) {
-                            error!("Danmaku rolling error: {}", e);
-                        }
+                        )
+                    {
+                        error!("Danmaku rolling error: {}", e);
                     }
                     // 异步处理事件
                     let processor = processor.clone();
@@ -256,6 +261,7 @@ pub struct DownloadTask {
 struct DownloadComponents {
     downloader: Arc<dyn Downloader + Send + Sync>,
     danmaku_client: Option<Arc<dyn Downloader>>,
+    uploader: Sender<UploaderMessage>,
 }
 
 impl DownloadTask {
@@ -271,20 +277,9 @@ impl DownloadTask {
         }
     }
 
-    pub async fn execute(self, uploader: &Sender<UploaderMessage>) -> AppResult<()> {
-        // 初始化组件
-        let components = self.initialize_components().await?;
-
-        // 创建守卫确保清理
-        let _guard = DownloadGuard::new(
-            self.ctx.worker.clone(),
-            components.danmaku_client.clone(),
-            self.rooms_handle.clone(),
-            components.downloader.clone(),
-        );
-
+    pub(self) async fn execute(self, components: DownloadComponents) -> AppResult<DownloadStatus> {
         // 创建事件处理器
-        let processor = SegmentEventProcessor::new(uploader.clone(), self.ctx.clone());
+        let processor = SegmentEventProcessor::new(components.uploader.clone(), self.ctx.clone());
 
         // 启动弹幕客户端
         if let Some(ref client) = components.danmaku_client {
@@ -300,17 +295,11 @@ impl DownloadTask {
             .change_context(AppError::Custom("Failed to download segment".into()))?;
 
         // 处理结果
-        match result {
-            DownloadStatus::Downloading => {}
-            DownloadStatus::SegmentCompleted => {}
-            DownloadStatus::StreamEnded => {}
-            DownloadStatus::Error(_) => {}
-        }
         info!(result=?result, "finished downloading");
-        Ok(())
+        Ok(result)
     }
 
-    async fn initialize_components(&self) -> AppResult<DownloadComponents> {
+    async fn initialize_components(&self, uploader: Sender<UploaderMessage>) -> DownloadComponents {
         // 获取配置和主播信息
         let config = self.ctx.worker.get_config();
         let streamer = self.ctx.worker.get_streamer();
@@ -330,10 +319,11 @@ impl DownloadTask {
             .create_downloader(stream_info, config, self.ctx.recorder.clone())
             .await;
 
-        Ok(DownloadComponents {
+        DownloadComponents {
             downloader,
             danmaku_client,
-        })
+            uploader,
+        }
     }
 
     async fn start_danmaku(&self, client: &Arc<dyn Downloader>) -> AppResult<()> {
@@ -365,9 +355,7 @@ impl DActor {
     /// 运行Actor主循环，处理接收到的消息
     pub(crate) async fn run(&mut self) {
         while let Ok(msg) = self.receiver.recv().await {
-            if let Err(e) = self.handle_message(msg).await {
-                error!("Error handling message: {}", e);
-            }
+            self.handle_message(msg).await
         }
     }
 
@@ -375,16 +363,43 @@ impl DActor {
     ///
     /// # 参数
     /// * `msg` - 要处理的下载消息
-    async fn handle_message(&mut self, msg: DownloaderMessage) -> AppResult<()> {
+    async fn handle_message(&mut self, msg: DownloaderMessage) {
         match msg {
-            DownloaderMessage::Start(plugin, ctx, rooms_handle) => {
+            DownloaderMessage::Start(plugin, mut ctx, rooms_handle) => {
+                let worker = ctx.worker.clone();
                 // 创建下载任务
-                let task = DownloadTask::new(plugin, ctx, rooms_handle);
+                let task = DownloadTask::new(plugin.clone(), ctx.clone(), rooms_handle.clone());
 
-                // 执行下载（使用 Result 链式处理）
-                task.execute(&self.sender).await?;
+                // 初始化组件
+                let components = task.initialize_components(self.sender.clone()).await;
+                // 创建守卫确保清理
+                let mut guard = DownloadGuard::new(
+                    worker.clone(),
+                    components.danmaku_client.clone(),
+                    rooms_handle.clone(),
+                    components.downloader.clone(),
+                );
 
-                Ok(())
+                // 更新工作器状态为工作中
+                rooms_handle
+                    .toggle(worker, WorkerStatus::Working(components.downloader.clone()))
+                    .await;
+
+                // 执行下载
+                let result = task.execute(components).await;
+
+                match plugin.check_status(&mut ctx).await {
+                    Ok(StreamStatus::Live {stream_info}) => {
+                        ctx.stream_info.raw_stream_url = stream_info.raw_stream_url;
+                        println!("stream_info=?stream_info");
+                    }
+                    Ok(StreamStatus::Offline) => {}
+                    Ok(StreamStatus::Unknown) => {}
+                    Err(_) => {}
+                }
+
+                guard.cleanup().await;
+                info!("Handling message: {:?} done", result);
             }
         }
     }

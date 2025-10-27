@@ -1,17 +1,21 @@
-use crate::server::common::util::Recorder;
-use crate::server::config::Config;
-use crate::server::core::downloader::Downloader;
-use crate::server::errors::{AppError, AppResult};
-use crate::server::infrastructure::context::{Context, Worker};
+pub mod yy;
+
+use crate::server::common::construct_headers;
+use crate::server::common::util::{Recorder, parse_time};
+use crate::server::config::{Config, default_segment_time};
+use crate::server::core::downloader::ffmpeg_downloader::FfmpegDownloader;
+use crate::server::core::downloader::stream_gears::StreamGears;
+use crate::server::core::downloader::{DownloadConfig, Downloader, DownloaderType};
+use crate::server::errors::AppError;
+use crate::server::infrastructure::context::Context;
 use crate::server::infrastructure::models::StreamerInfo;
 use async_trait::async_trait;
-use chrono::{DateTime, Local};
+use biliup::downloader::util::Segmentable;
 use error_stack::Report;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use time::OffsetDateTime;
 
 /// 流信息结构
 /// 包含直播流的详细信息
@@ -33,7 +37,7 @@ pub struct StreamInfoExt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamStatus {
     /// 正在直播，包含流信息
-    Live { stream_info: StreamInfoExt },
+    Live { stream_info: Box<StreamInfoExt> },
     /// 离线状态
     Offline,
     /// 未知状态
@@ -70,7 +74,41 @@ pub trait DownloadPlugin {
         stream_info: &StreamInfoExt,
         config: Config,
         recorder: Recorder,
-    ) -> Arc<dyn Downloader>;
+    ) -> Arc<dyn Downloader> {
+        let raw_stream_url = &stream_info.raw_stream_url;
+        match config.downloader {
+            Some(DownloaderType::Ffmpeg) => {
+                let config = DownloadConfig {
+                    segment_time: config.segment_time.or_else(default_segment_time),
+                    file_size: Some(config.file_size), // 2GB
+                    headers: stream_info.stream_headers.clone(),
+                    recorder,
+                    // output_dir: PathBuf::from("./downloads")
+                    output_dir: PathBuf::from("."),
+                };
+
+                Arc::new(FfmpegDownloader::new(
+                    raw_stream_url,
+                    config,
+                    Vec::new(),
+                    DownloaderType::FfmpegExternal,
+                ))
+            }
+            // Some(DownloaderType::StreamGears) => {
+            //
+            // },
+            _ => Arc::new(StreamGears::new(
+                raw_stream_url,
+                construct_headers(&stream_info.stream_headers),
+                recorder.filename_template(),
+                Segmentable::new(
+                    config.segment_time.as_deref().map(parse_time),
+                    Some(config.file_size),
+                ),
+                None,
+            )),
+        }
+    }
 
     /// 初始化弹幕客户端（可选）
     fn danmaku_init(&self) -> Option<Box<dyn Downloader>>;

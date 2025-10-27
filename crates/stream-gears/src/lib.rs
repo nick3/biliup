@@ -16,79 +16,19 @@ use biliup::credential::Credential;
 use biliup::downloader::extractor::CallbackFn;
 use biliup::downloader::util::{LifecycleFile, Segmentable};
 use biliup::downloader::{hls, httpflv};
-use pyo3::types::PyType;
+use pyo3::types::{PyList, PyType};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Mutex, Once};
 use std::time::Duration;
 use tracing::{debug, error, info};
-use tracing_subscriber::EnvFilter;
 
 use biliup::client::StatelessClient;
 use biliup::downloader::flv_parser::header;
 use biliup::downloader::httpflv::Connection;
+use biliup_cli::server::common::construct_headers;
 use pyo3::exceptions::PyRuntimeError;
-use tracing_appender::rolling::Rotation;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-
-static INIT: Once = Once::new();
-// 全局保存 guard，防止被 drop
-static GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
-
-fn init_tracing_with_rotation() {
-    INIT.call_once(|| {
-        let local_time = tracing_subscriber::fmt::time::LocalTime::new(format_description!(
-            "[year]-[month]-[day] [hour]:[minute]:[second]"
-        ));
-        // 按日期滚动，每天创建新文件
-        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(Rotation::DAILY) // rotate log files once every hour
-            .rotation(Rotation::NEVER) // rotate log files once every hour
-            .filename_prefix("biliup") // log file names will be prefixed with `myapp.`
-            .filename_prefix("download") // log file names will be prefixed with `myapp.`
-            .filename_suffix("log") // log file names will be suffixed with `.log`
-            // .max_log_files(3)
-            // .build("logs") // try to build an appender that stores log files in `/var/log`
-            .build("") // try to build an appender that stores log files in `/var/log`
-            .expect("initializing rolling file appender failed");
-        // 或者按小时滚动
-        // let file_appender = tracing_appender::rolling::hourly("logs", "upload.log");
-
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-        // 保存 guard
-        *GUARD.lock().unwrap() = Some(guard);
-
-        let subscriber = tracing_subscriber::registry()
-            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-            // 控制台输出
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_target(false)
-                    .with_timer(local_time.clone())
-                    .with_file(true) // 打印文件名
-                    .with_line_number(true)
-                    .with_thread_ids(true),
-            )
-            // 文件输出
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(non_blocking)
-                    .with_timer(local_time)
-                    .with_target(true)
-                    .with_thread_ids(true)
-                    .with_file(true)
-                    .with_line_number(true)
-                    .with_ansi(false), // .json() // 可选：使用 JSON 格式便于解析
-            );
-
-        subscriber.init();
-
-        info!("Tracing initialized with daily rotation");
-    });
-}
 
 #[tokio::main]
 pub async fn download_with_hook(
@@ -127,17 +67,6 @@ pub async fn download_with_hook(
         }
     }
     Ok(())
-}
-
-pub fn construct_headers(hash_map: &HashMap<String, String>) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for (key, value) in hash_map.iter() {
-        headers.insert(
-            HeaderName::from_str(key).unwrap(),
-            HeaderValue::from_str(value).unwrap(),
-        );
-    }
-    headers
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +390,34 @@ fn upload(
 
 #[pyfunction]
 pub fn main_loop(py: Python<'_>) -> PyResult<()> {
-    py.detach(|| server::_main().map_err(|e| PyRuntimeError::new_err(format!("{e:?}"))))
+    // 获取 Python 的 sys.argv
+    let sys = py.import("sys")?;
+    let bound = sys.getattr("argv")?;
+    let argv: &Bound<PyList> = bound.cast()?;
+
+    let mut args: Vec<String> = argv
+        .iter()
+        .map(|x| x.extract::<String>())
+        .collect::<PyResult<Vec<_>>>()?;
+
+    // if args.len() == 1 {
+    //     args.push("server".to_string());
+    // }
+    match args.as_slice() {
+        &[] => todo!(),
+        &[_] => {
+            args.push("server".to_string());
+        }
+        [_, command, ..] => {
+            if command == "start" {
+                args[1] = "server".to_string();
+            }
+        }
+    }
+
+    py.detach(|| {
+        server::_main(args.as_slice()).map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))
+    })
 
     // for item in plugin_list.iter() {
     //     // 每个元素都是一个类（type）
@@ -488,7 +444,6 @@ pub fn main_loop(py: Python<'_>) -> PyResult<()> {
 /// A Python module implemented in Rust.
 #[pymodule]
 fn stream_gears(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    init_tracing_with_rotation();
     // let file_appender = tracing_appender::rolling::daily("", "upload.log");
     // let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     // tracing_subscriber::fmt()

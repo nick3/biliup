@@ -6,7 +6,6 @@ use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::{Context, Stage, Worker, WorkerStatus};
 use crate::server::infrastructure::models::StreamerInfo;
 use async_channel::{Receiver, Sender, bounded};
-use chrono::Local;
 use ormlite::Model;
 use ormlite::model::ModelBuilder;
 use std::sync::Arc;
@@ -45,7 +44,7 @@ async fn start_client(
                         .url(sql_no_id.url.clone())
                         .name(room.live_streamer.remark.clone())
                         .title(sql_no_id.title.clone())
-                        .date(sql_no_id.date.clone())
+                        .date(sql_no_id.date)
                         .live_cover_path(sql_no_id.live_cover_path.clone())
                         .insert(&ctx.pool)
                         .await
@@ -58,7 +57,8 @@ async fn start_client(
                     };
                     info!(url = url, "room: is live -> 开播了");
                     // 更新状态为等待中
-                    room.change_status(Stage::Download, WorkerStatus::Pending);
+                    room.change_status(Stage::Download, WorkerStatus::Pending)
+                        .await;
                     stream_info.streamer_info = insert;
 
                     let streamer = room.get_streamer();
@@ -71,13 +71,11 @@ async fn start_client(
                         streamer
                             .filename_prefix
                             .or(room.get_config().filename_prefix.clone()),
-                        &streamer.remark,
-                        &stream_info.streamer_info.title,
+                        stream_info.streamer_info.clone(),
                         &suffix,
-                        stream_info.streamer_info.date.with_timezone(&Local),
                     );
                     // 修改 ctx
-                    ctx.stream_info = stream_info;
+                    ctx.stream_info = *stream_info;
                     ctx.recorder = recorder;
                     // 发送下载开始消息
                     if actor_handle
@@ -90,8 +88,7 @@ async fn start_client(
                         .await
                         .is_ok()
                     {
-                        // 切换房间状态
-                        rooms_handle.toggle(room).await;
+                        info!("成功开始录制 {}", url)
                     }
                 }
                 Ok(StreamStatus::Offline) => {}
@@ -229,11 +226,14 @@ impl RoomsHandle {
     ///
     /// # 参数
     /// * `worker` - 要切换的工作器
-    pub async fn toggle(&self, worker: Arc<Worker>) {
-        let msg = ActorMessage::Toggle(worker.clone());
+    pub async fn toggle(&self, worker: Arc<Worker>, status: WorkerStatus) {
+        let (send, recv) = oneshot::channel();
+
+        let msg = ActorMessage::Toggle(send, worker.clone(), status);
 
         // 忽略发送错误
         let _ = self.sender.send(msg).await;
+        recv.await.expect("Actor task has been killed")
     }
 }
 
@@ -252,7 +252,7 @@ enum ActorMessage {
         id: i64,
     },
     /// 切换工作器状态
-    Toggle(Arc<Worker>),
+    Toggle(oneshot::Sender<()>, Arc<Worker>, WorkerStatus),
 }
 
 /// 房间Actor
@@ -282,12 +282,12 @@ impl RoomsActor {
     /// 运行Actor主循环
     async fn run(&mut self) {
         while let Ok(msg) = self.receiver.recv().await {
-            self.handle_message(msg);
+            self.handle_message(msg).await;
         }
     }
 
     /// 处理接收到的消息
-    fn handle_message(&mut self, msg: ActorMessage) {
+    async fn handle_message(&mut self, msg: ActorMessage) {
         match msg {
             ActorMessage::NextRoom { respond_to } => {
                 // `let _ =` 忽略发送时的任何错误
@@ -303,8 +303,10 @@ impl RoomsActor {
                 // 如果使用`select!`宏取消等待响应，可能会发生这种情况
                 let _ = respond_to.send(self.del(id));
             }
-            ActorMessage::Toggle(worker) => {
-                self.toggle_keep_order(&worker);
+            ActorMessage::Toggle(sender, worker, status) => {
+                self.toggle_keep_order(&worker, status).await;
+                // `let _ =` 忽略发送时的任何错误
+                let _ = sender.send(());
             }
         }
     }
@@ -342,19 +344,83 @@ impl RoomsActor {
     }
 
     /// 切换工作器状态，保持顺序
-    fn toggle_keep_order(&mut self, worker: &Arc<Worker>) -> bool {
-        // 从活跃列表移动到等待列表
-        if let Some(i) = self.rooms.iter().position(|x| x == worker) {
-            let val = self.rooms.remove(i); // 保序，但O(n)
-            self.waiting.push(val);
-            true
-        } else if let Some(i) = self.waiting.iter().position(|x| x == worker) {
-            // 从等待列表移动到活跃列表
-            let val = self.waiting.swap_remove(i);
-            self.rooms.push(val);
-            true
-        } else {
-            false
+    async fn toggle_keep_order(&mut self, worker: &Arc<Worker>, status: WorkerStatus) {
+        let mut write_guard = worker.downloader_status.write().await;
+        match (&*write_guard, &status) {
+            (WorkerStatus::Working(_), WorkerStatus::Idle) => {
+                if let Some(i) = self.waiting.iter().position(|x| x == worker) {
+                    // 从等待列表移动到活跃列表
+                    let val = self.waiting.swap_remove(i);
+                    self.rooms.push(val);
+                    *write_guard = status;
+                } else {
+                    error!(
+                        url = worker.live_streamer.url,
+                        "working 状态应该在等待队列中"
+                    )
+                }
+            }
+            (WorkerStatus::Idle | WorkerStatus::Pending, WorkerStatus::Working(_)) => {
+                // 从活跃列表移动到等待列表
+                if let Some(i) = self.rooms.iter().position(|x| x == worker) {
+                    let val = self.rooms.remove(i); // 保序，但O(n)
+                    self.waiting.push(val);
+                    *write_guard = status;
+                } else {
+                    error!(url = worker.live_streamer.url, "idle状态应该在活跃列表中");
+                }
+            }
+            (WorkerStatus::Pause, WorkerStatus::Idle) => {
+                if let Some(i) = self.waiting.iter().position(|x| x == worker) {
+                    // 从等待列表移动到活跃列表
+                    let val = self.waiting.swap_remove(i);
+                    self.rooms.push(val);
+                    *write_guard = status;
+                } else {
+                    error!(
+                        url = worker.live_streamer.url,
+                        "working 状态应该在等待队列中"
+                    )
+                }
+            }
+            (WorkerStatus::Idle, WorkerStatus::Pause) => {
+                // 从活跃列表移动到等待列表
+                if let Some(i) = self.rooms.iter().position(|x| x == worker) {
+                    let val = self.rooms.remove(i); // 保序，但O(n)
+                    self.waiting.push(val);
+                    *write_guard = status;
+                } else {
+                    error!(url = worker.live_streamer.url, "idle状态应该在活跃列表中");
+                }
+            }
+            (WorkerStatus::Working(_), WorkerStatus::Pause) => {
+                // 从活跃列表移动到等待列表
+                if let Some(i) = self.rooms.iter().position(|x| x == worker) {
+                    let val = self.rooms.remove(i); // 保序，但O(n)
+                    self.waiting.push(val);
+                    *write_guard = status;
+                } else {
+                    error!(url = worker.live_streamer.url, "idle状态应该在活跃列表中");
+                }
+            }
+            remaining => {
+                error!("非法的状态转移: {:?}", remaining);
+            }
         }
+        // worker.change_status(Stage::Download, status).await;
+
+        // // 从活跃列表移动到等待列表
+        // if let Some(i) = self.rooms.iter().position(|x| x == worker) {
+        //     let val = self.rooms.remove(i); // 保序，但O(n)
+        //     self.waiting.push(val);
+        //     true
+        // } else if let Some(i) = self.waiting.iter().position(|x| x == worker) {
+        //     // 从等待列表移动到活跃列表
+        //     let val = self.waiting.swap_remove(i);
+        //     self.rooms.push(val);
+        //     true
+        // } else {
+        //     false
+        // }
     }
 }

@@ -1,20 +1,19 @@
 use crate::UploadLine;
 use crate::server::common::util::Recorder;
-use crate::server::core::downloader::{SegmentEvent, SegmentInfo};
+use crate::server::core::downloader::SegmentInfo;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::context::{Context, Stage, Worker, WorkerStatus};
 use crate::server::infrastructure::models::InsertFileItem;
 use crate::server::infrastructure::models::hook_step::process_video;
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use async_channel::Receiver;
-use biliup::bilibili::{BiliBili, Credit, ResponseData, Studio, Video};
+use biliup::bilibili::{BiliBili, ResponseData, Studio, Video};
 use biliup::client::StatelessClient;
 use biliup::credential::login_by_cookies;
 use biliup::error::Kind;
 use biliup::uploader::line::{Line, Probe};
 use biliup::uploader::util::SubmitOption;
 use biliup::uploader::{VideoFile, line};
-use chrono::Local;
 use error_stack::ResultExt;
 use futures::StreamExt;
 use futures::stream::Inspect;
@@ -73,7 +72,7 @@ where
 
     // 4. 执行后处理
     if !uploaded_videos.paths.is_empty() {
-        execute_postprocessor(uploaded_videos.paths, &ctx).await?;
+        execute_postprocessor(uploaded_videos.paths, ctx).await?;
     }
 
     Ok(())
@@ -119,7 +118,7 @@ async fn get_upload_line(client: &StatelessClient, line: &str) -> AppResult<Line
 }
 
 async fn pipeline_upload_videos<F>(
-    mut rx: Inspect<Receiver<SegmentInfo>, F>,
+    rx: Inspect<Receiver<SegmentInfo>, F>,
     context: &UploadContext,
 ) -> AppResult<UploadedVideos>
 where
@@ -215,11 +214,11 @@ pub async fn submit_to_bilibili(
 
     let result = match submit_option {
         SubmitOption::BCutAndroid => bilibili
-            .submit_by_bcut_android(&studio, None)
+            .submit_by_bcut_android(studio, None)
             .await
             .change_context(AppError::Unknown)?,
         _ => bilibili
-            .submit_by_app(&studio, None)
+            .submit_by_app(studio, None)
             .await
             .change_context(AppError::Unknown)?,
     };
@@ -324,7 +323,7 @@ pub async fn upload(
                 .to_str()
         );
         info!("{line:?}");
-        let video_file = VideoFile::new(&video_path).change_context_lazy(|| AppError::Unknown)?;
+        let video_file = VideoFile::new(video_path).change_context_lazy(|| AppError::Unknown)?;
         let total_size = video_file.total_size;
         let file_name = video_file.file_name.clone();
         let uploader = line
@@ -384,7 +383,8 @@ impl UActor {
         match msg {
             UploaderMessage::SegmentEvent(rx, ctx) => {
                 ctx.worker
-                    .change_status(Stage::Upload, WorkerStatus::Pending);
+                    .change_status(Stage::Upload, WorkerStatus::Pending)
+                    .await;
                 let inspect = rx.inspect(|f| {
                     let pool = ctx.pool.clone();
                     let streamer_info_id = ctx.stream_info.streamer_info.id;
@@ -417,7 +417,9 @@ impl UActor {
                     // 可以添加错误通知机制
                 }
                 info!(url=ctx.stream_info.streamer_info.url, result=?result, "后处理执行完毕：Finished processing segment event");
-                ctx.worker.change_status(Stage::Upload, WorkerStatus::Idle);
+                ctx.worker
+                    .change_status(Stage::Upload, WorkerStatus::Idle)
+                    .await;
             }
         }
     }
