@@ -1,9 +1,8 @@
 use crate::server::core::downloader;
 use crate::server::core::downloader::{
-    DownloadConfig, DownloadStatus, Downloader, DownloaderType, SegmentEvent, SegmentInfo,
+    DownloadConfig, DownloadStatus, DownloaderType, SegmentEvent, SegmentInfo,
 };
 use crate::server::errors::{AppError, AppResult};
-use async_trait::async_trait;
 use error_stack::{ResultExt, bail};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
@@ -212,7 +211,7 @@ impl FfmpegDownloader {
         let part_file = format!("{}.part", output_file.display());
         tokio::fs::rename(&part_file, &output_file)
             .await
-            .change_context(AppError::Unknown)?;
+            .change_context(AppError::Custom(String::from("退出时，重命名文件")))?;
         // let (tx, rx) = bounded(16);
         // 分段回调
         // 触发分段回调
@@ -321,9 +320,8 @@ impl FfmpegDownloader {
     }
 }
 
-#[async_trait]
-impl Downloader for FfmpegDownloader {
-    async fn download<'a>(
+impl FfmpegDownloader {
+    pub(crate) async fn download<'a>(
         &self,
         callback: Box<dyn FnMut(SegmentEvent) + Send + Sync + 'a>,
         download_config: DownloadConfig,
@@ -341,7 +339,7 @@ impl Downloader for FfmpegDownloader {
         }
     }
 
-    async fn stop(&self) -> AppResult<()> {
+    pub(crate) async fn stop(&self) -> AppResult<()> {
         let mut handle = self.process_handle.write().await;
         if let Some(child) = &mut *handle {
             child.kill().await.change_context(AppError::Unknown)?;

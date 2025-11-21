@@ -66,7 +66,7 @@ where
             recorder,
         )
         .await?;
-        let submit_api = ctx.worker.config.read().unwrap().submit_api.clone();
+        let submit_api = ctx.worker.get_config().submit_api.clone();
         submit_to_bilibili(&upload_context.bilibili, &studio, submit_api.as_deref()).await?;
     }
 
@@ -251,6 +251,7 @@ pub(crate) async fn build_studio(
         .up_close_reply(upload_config.up_close_reply.unwrap_or_default())
         .up_selection_reply(upload_config.up_selection_reply.unwrap_or_default())
         .up_close_danmu(upload_config.up_close_danmu.unwrap_or_default())
+        .maybe_is_only_self(upload_config.is_only_self)
         .maybe_desc_v2(None)
         .extra_fields(
             serde_json::from_str(&upload_config.extra_fields.clone().unwrap_or_default())
