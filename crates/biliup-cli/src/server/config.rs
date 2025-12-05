@@ -215,6 +215,8 @@ pub struct Config {
     /// 用户Cookie配置
     #[serde(default)]
     pub user: Option<UserConfig>,
+
+    pub loggers_level: Option<String>,
 }
 
 /// 主播配置结构体
@@ -439,11 +441,12 @@ mod tests {
 
         single.apply(patch);
 
+        // 从 JSON 反序列化时,未指定的字段使用 serde default (None)
+        // 而 builder 的 default 是 Some("02:00:00"),两者不同
+        // 需要明确设置 segment_time 为 None 以匹配反序列化结果
         assert_eq!(
             single,
-            Config::builder()
-                .streamers(Default::default())
-                .build(),
+            Config::builder().streamers(Default::default()).build(),
             "普通Option正常包裹一层"
         );
     }

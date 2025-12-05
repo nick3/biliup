@@ -1,4 +1,3 @@
-use crate::UploadLine;
 use crate::server::common::upload::{build_studio, submit_to_bilibili, upload};
 use crate::server::common::util::Recorder;
 use crate::server::config::Config;
@@ -18,6 +17,7 @@ use crate::server::infrastructure::repositories::{
     del_streamer, get_all_streamer, get_upload_config,
 };
 use crate::server::infrastructure::service_register::ServiceRegister;
+use crate::{LogHandle, UploadLine};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -35,6 +35,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 pub async fn get_streamers_endpoint(
     State(pool): State<ConnectionPool>,
@@ -123,7 +124,6 @@ pub async fn put_streamers_endpoint(
 }
 
 pub async fn delete_streamers_endpoint(
-    State(service_register): State<ServiceRegister>,
     State(managers): State<Arc<DownloadManager>>,
     State(pool): State<ConnectionPool>,
     Path(id): Path<i64>,
@@ -137,9 +137,7 @@ pub async fn delete_streamers_endpoint(
 
 // #[axum::debug_handler(state = ServiceRegister)]
 pub async fn pause_streamers_endpoint(
-    State(service_register): State<ServiceRegister>,
     State(managers): State<Arc<DownloadManager>>,
-    State(pool): State<ConnectionPool>,
     Path(id): Path<i64>,
 ) -> Result<Json<()>, Response> {
     let worker = managers.get_room_by_id(id).await;
@@ -182,6 +180,7 @@ pub async fn get_configuration(
 pub async fn put_configuration(
     State(config): State<Arc<RwLock<Config>>>,
     State(pool): State<ConnectionPool>,
+    State(log_handle): State<LogHandle>,
     Json(json_data): Json<Config>,
 ) -> Result<Json<Config>, Response> {
     // 将 JSON 序列化为 TEXT 存库
@@ -260,7 +259,19 @@ pub async fn put_configuration(
         .change_context(AppError::Unknown)
         .map_err(report_to_response)?;
     *config.write().unwrap() = saved_config;
-    Ok(Json(config.read().unwrap().clone()))
+    let guard = config.read().unwrap();
+    if let Some(loggers_level) = &guard.loggers_level {
+        let new_filter = EnvFilter::try_new(loggers_level)
+            .change_context(AppError::Custom(String::from("Invalid log level format")))
+            .map_err(report_to_response)?;
+
+        log_handle
+            .modify(|filter| *filter = new_filter)
+            .change_context(AppError::Unknown)
+            .map_err(report_to_response)?;
+    }
+
+    Ok(Json(guard.clone()))
 }
 
 pub async fn get_streamer_info(
@@ -544,37 +555,36 @@ pub async fn post_uploads(
         (line, limit, submit_api)
     };
     info!("通过页面开始上传");
-    let (bilibili, videos) = upload(
-        upload_config
-            .user_cookie
-            .as_deref()
-            .unwrap_or("cookies.json"),
-        None,
-        line,
-        &json_data.files,
-        limit as usize,
-    )
-    .await
-    .map_err(report_to_response)?;
-    if !videos.is_empty() {
-        let recorder = Recorder::new(
-            upload_config.title.clone(),
-            StreamerInfo::new(
-                &upload_config.template_name,
-                "stream_title",
-                "",
-                Utc::now(),
-                "",
-            ),
-            "",
-        );
-        let studio = build_studio(&upload_config, &bilibili, videos, recorder)
-            .await
-            .map_err(report_to_response)?;
-        let response_data = submit_to_bilibili(&bilibili, &studio, submit_api.as_deref())
-            .await
-            .map_err(report_to_response)?;
-        info!("通过页面上传成功 {:?}", response_data);
-    }
+    tokio::spawn(async move {
+        let (bilibili, videos) = upload(
+            upload_config
+                .user_cookie
+                .as_deref()
+                .unwrap_or("cookies.json"),
+            None,
+            line,
+            &json_data.files,
+            limit as usize,
+        )
+        .await?;
+        if !videos.is_empty() {
+            let recorder = Recorder::new(
+                upload_config.title.clone(),
+                StreamerInfo::new(
+                    &upload_config.template_name,
+                    "stream_title",
+                    "",
+                    Utc::now(),
+                    "",
+                ),
+            );
+            let studio = build_studio(&upload_config, &bilibili, videos, &recorder).await?;
+            let response_data =
+                submit_to_bilibili(&bilibili, &studio, submit_api.as_deref()).await?;
+            info!("通过页面上传成功 {:?}", response_data);
+        }
+        Ok::<_, Report<AppError>>(())
+    });
+
     Ok(Json(serde_json::json!({})))
 }

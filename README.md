@@ -16,8 +16,6 @@
 
 </div>
 
-
-
 ## 🛠️ 功能
 * 开箱即用，多种安装方式，提供可视化WebUi界面
 * 多主播录制/上传，24X7无人值守运行，高自定义元信息
@@ -27,13 +25,24 @@
 
 ## 📜 更新日志
 
+> [!IMPORTANT]  
+> **Disclaimer / 免责声明**
+> - 本项目仅供个人学习研究，不保证稳定性，不提供技术支持
+> - 使用本项目产生的一切后果由用户自行承担
+> - 禁止商业用途，请遵守版权及平台规定
+> - This project is for **personal learning and research purposes only**
+> - No stability guarantee or technical support provided
+> - Users are solely responsible for any consequences of using this project
+> - Commercial use is strictly prohibited
+> - Please respect copyright and platform ToS
+
 - **[更新日志 »](https://biliup.github.io/biliup/docs/guide/changelog)**
 
-
-
-
 ## 📜 使用文档
-获取命令帮助 `biliup --help`
+B 站命令行投稿工具，支持**短信登录**、**账号密码登录**、**扫码登录**、**浏览器登录**以及**网页Cookie登录**，并将登录后返回的 cookie 和 token 保存在 `cookie.json` 中，可用于其他项目。
+
+获取命令帮助 `biliup --help` \
+**文档地址**：<https://biliup.github.io/biliup-rs>
 ```shell
 Upload video to bilibili.
 
@@ -76,7 +85,7 @@ Options:
 ## 🚀 快速开始
 
 ### Windows
-- 下载 exe: [Release](https://github.com/biliup/biliup/releases/latest)
+- 下载 Release: [bbup-app_0.1.0_x64](https://github.com/biliup/biliup/releases/latest)
 
 ### Linux 或 macOS
 1. 安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 
@@ -89,10 +98,12 @@ Options:
 ### Termux
 - 详见[Wiki](https://github.com/biliup/biliup/wiki/Termux-%E4%B8%AD%E4%BD%BF%E7%94%A8-biliup)
 
-
 ---
 
 ## 🧑‍💻开发
+
+<details>
+
 ### 架构概览
 
 Rust后端 + Python引擎 + Next.js前端的混合架构。
@@ -149,6 +160,7 @@ graph TB
     style BILI fill:#ffebee
     style STREAMS fill:#ffebee
 ```
+</details>
 
 ### frontend
 
@@ -157,11 +169,17 @@ graph TB
 3. 启动开发服务器：`npm run dev`
 4. 访问：`http://localhost:3000`
 
-### backend
+### Python
 
 1. 安装依赖 `maturin dev`
 2. `npm run build` 
 3. 启动 Biliup：`python3 -m biliup`
+
+### Rust-cli
+
+1. `npm run build`
+2. 构建 `cargo build --release --bin biliup`
+3. 开发启动 BiliupR：`cargo run`
 
 ## 🤝Credits
 * Thanks `ykdl, youtube-dl, streamlink` provides downloader.

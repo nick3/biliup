@@ -11,7 +11,7 @@ use biliup_cli::server::core::downloader::DanmakuClient;
 use biliup_cli::server::core::plugin::{DownloadBase, DownloadPlugin, StreamInfoExt, StreamStatus};
 use biliup_cli::server::errors::{AppError, AppResult};
 use biliup_cli::server::infrastructure::connection_pool::ConnectionManager;
-use biliup_cli::server::infrastructure::context::{Context, Worker};
+use biliup_cli::server::infrastructure::context::{Context, PluginContext, Worker};
 use biliup_cli::server::infrastructure::models::StreamerInfo;
 use biliup_cli::server::infrastructure::repositories;
 use biliup_cli::server::infrastructure::repositories::get_upload_config;
@@ -19,7 +19,7 @@ use biliup_cli::server::infrastructure::service_register::ServiceRegister;
 use biliup_cli::uploader::{append, list, login, renew, show, upload_by_command, upload_by_config};
 use chrono::Utc;
 use clap::Parser;
-use error_stack::{FutureExt, Report, ResultExt};
+use error_stack::{Report, ResultExt};
 use fancy_regex::Regex;
 use pyo3::prelude::PyDictMethods;
 use pyo3::prelude::{PyAnyMethods, PyListMethods, PyModule};
@@ -35,9 +35,9 @@ use std::sync::{Arc, LazyLock, RwLock};
 use time::macros::format_description;
 use tracing::{debug, info, warn};
 use tracing_appender::rolling::Rotation;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, reload};
 
 #[derive(Debug)]
 pub struct PyPlugin {
@@ -68,15 +68,17 @@ pub struct PyDownloader {
     url: String,
     remark: String,
     danmaku: Option<Arc<Py<PyAny>>>,
+    cfg: OnceConfig,
 }
 
 impl PyDownloader {
-    fn new(plugin: Arc<Py<PyType>>, url: String, remark: String) -> Self {
+    fn new(plugin: Arc<Py<PyType>>, url: String, remark: String, cfg: Config) -> Self {
         Self {
             plugin,
             url: url.clone(),
             remark: remark.clone(),
             danmaku: None,
+            cfg: OnceConfig { map: cfg },
         }
     }
 
@@ -84,6 +86,7 @@ impl PyDownloader {
         let url = self.url.clone();
         let remark = self.remark.clone();
         let obj = self.plugin.clone();
+        let config = self.cfg.clone();
         Ok(
             match tokio::task::spawn_blocking(move || {
                 Python::attach(
@@ -101,7 +104,7 @@ impl PyDownloader {
                         let asyncio = PyModule::import(py, "asyncio")?;
 
                         // 生成协程 self.acheck_stream()
-                        let instance = obj.bind(py).call1((remark, url))?;
+                        let instance = obj.bind(py).call1((remark, url, config))?;
                         let coro = instance.call_method0("acheck_stream")?;
 
                         // 调度到指定 loop
@@ -132,7 +135,7 @@ impl PyDownloader {
                                 self_obj.getattr("stream_headers")?.extract()?
                             };
 
-                            let danmaku_init = self_obj.call_method0("danmaku_init")?;
+                            let _danmaku_init = self_obj.call_method0("danmaku_init")?;
                             // let platform: Option<PyAny> = self_obj.getattr("danmaku")?.extract()?;
                             // danmaku 可能在条件下没有设置（比如 bilibili_danmaku 为 False）
                             let self_danmaku = self_obj.getattr("danmaku")?;
@@ -194,10 +197,15 @@ impl DownloadPlugin for PyPlugin {
         false
     }
 
-    fn create_downloader(&self, ctx: &mut Context) -> Box<dyn DownloadBase> {
-        let url = ctx.worker.live_streamer.url.to_string();
-        let remark = ctx.worker.live_streamer.remark.to_string();
-        Box::new(PyDownloader::new(self.plugin.clone(), url, remark))
+    fn create_downloader(&self, ctx: &mut PluginContext) -> Box<dyn DownloadBase> {
+        let url = ctx.live_streamer().url.to_string();
+        let remark = ctx.live_streamer().remark.to_string();
+        Box::new(PyDownloader::new(
+            self.plugin.clone(),
+            url,
+            remark,
+            ctx.config(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -257,6 +265,57 @@ pub fn from_py() -> PyResult<Vec<PyPlugin>> {
     // let download_base: &Bound<PyType> = download_base.downcast()?;
 
     Ok(classes)
+}
+
+#[pyclass]
+#[derive(Debug, Clone)]
+struct OnceConfig {
+    // 用 PyObject 存，方便保持任意 Python 对象
+    map: Config,
+}
+
+#[pymethods]
+impl OnceConfig {
+    /// 获取：config.get("k", default=None)
+    /// - 若 key 存在，返回保存的对象
+    /// - 若不存在，返回 default（默认 None）
+    #[pyo3(signature = (key, default=None))]
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        key: &str,
+        default: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let guard = &self.map;
+        // serde_json::to_value(guard.deref())
+        if let Some(bound) = pythonize(py, guard)?
+            .extract::<Bound<PyDict>>()?
+            .get_item(key)?
+        {
+            if bound.is_none()
+                && let Some(d) = default
+            {
+                return Ok(d);
+            }
+            // 尝试转换为字典并过滤
+            return match bound.cast::<PyDict>() {
+                Ok(dict) => {
+                    let filtered = PyDict::new(py);
+                    dict.iter()
+                        .filter(|(_, v)| !v.is_none())
+                        .try_for_each(|(k, v)| filtered.set_item(k, v))?;
+                    Ok(filtered.into_any())
+                }
+                Err(_) => Ok(bound), // 不是字典，直接返回
+            };
+        };
+        let Some(default) = default else {
+            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "object has no attribute '{key}'"
+            )));
+        };
+        Ok(default)
+    }
 }
 
 #[pyclass]
@@ -339,6 +398,14 @@ pub(crate) async fn _main(args: &[String]) -> AppResult<()> {
     let local_time = tracing_subscriber::fmt::time::LocalTime::new(format_description!(
         "[year]-[month]-[day] [hour]:[minute]:[second]"
     ));
+
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_timer(local_time.clone())
+        .with_file(true) // 打印文件名
+        .with_line_number(true)
+        .with_thread_ids(true);
+
     // 按日期滚动，每天创建新文件
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(Rotation::DAILY) // rotate log files once every hour
@@ -355,27 +422,25 @@ pub(crate) async fn _main(args: &[String]) -> AppResult<()> {
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter_layer, reload_handle) = reload::Layer::new(filter);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_timer(local_time)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_ansi(false);
+
     let subscriber = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(filter_layer) // 这个是“总开关”，所有 layer 都会被它过滤
         // 控制台输出
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_timer(local_time.clone())
-                .with_file(true) // 打印文件名
-                .with_line_number(true)
-                .with_thread_ids(true),
-        )
+        .with(console_layer)
         // 文件输出
         .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(non_blocking)
-                .with_timer(local_time)
-                .with_target(true)
-                .with_thread_ids(true)
-                .with_file(true)
-                .with_line_number(true)
-                .with_ansi(false), // .json() // 可选：使用 JSON 格式便于解析
+            file_layer, // .json() // 可选：使用 JSON 格式便于解析
         );
 
     subscriber.init();
@@ -461,8 +526,12 @@ pub(crate) async fn _main(args: &[String]) -> AppResult<()> {
                 download_manager.add_plugin(Arc::new(v));
             }
 
-            let service_register =
-                ServiceRegister::new(conn_pool.clone(), CONFIG.clone(), download_manager);
+            let service_register = ServiceRegister::new(
+                conn_pool.clone(),
+                CONFIG.clone(),
+                download_manager,
+                reload_handle,
+            );
 
             let all_streamer = repositories::get_all_streamer(&conn_pool).await?;
 

@@ -81,6 +81,12 @@ pub async fn upload_by_command(
     submit: SubmitOption,
     proxy: Option<&str>,
 ) -> AppResult<()> {
+    if video_path.is_empty() {
+        return Err(AppError::Custom(
+            "No video files specified. Please provide at least one video file path.".to_string(),
+        )
+        .into());
+    }
     let bili = login_by_cookies(user_cookie, proxy).await?;
     if studio.title.is_empty() {
         studio.title = video_path[0]
@@ -164,6 +170,12 @@ pub async fn append(
     submit: SubmitOption,
     proxy: Option<&str>,
 ) -> AppResult<()> {
+    if video_path.is_empty() {
+        return Err(AppError::Custom(
+            "No video files specified. Please provide at least one video file path.".to_string(),
+        )
+        .into());
+    }
     let bilibili = login_by_cookies(user_cookie, proxy).await?;
     let mut uploaded_videos = upload(&video_path, &bilibili, line, limit).await?;
     let mut studio = bilibili
@@ -251,11 +263,14 @@ async fn login_by_cookies(user_cookie: PathBuf, proxy: Option<&str>) -> AppResul
 
 pub async fn cover_up(studio: &mut Studio, bili: &BiliBili) -> AppResult<()> {
     if !studio.cover.is_empty() {
+        // 扩展路径中的 ~ 为用户主目录
+        let expanded = shellexpand::tilde(&studio.cover);
+        let cover_path = PathBuf::from(expanded.as_ref());
+
         let url = bili
-            .cover_up(
-                &std::fs::read(Path::new(&studio.cover))
-                    .change_context_lazy(|| AppError::Custom(format!("cover: {}", studio.cover)))?,
-            )
+            .cover_up(&std::fs::read(&cover_path).change_context_lazy(|| {
+                AppError::Custom(format!("cover: {}", cover_path.display()))
+            })?)
             .await
             .change_context_lazy(|| AppError::Unknown)?;
         info!("{url}");
