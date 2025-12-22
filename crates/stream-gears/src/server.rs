@@ -11,7 +11,7 @@ use biliup_cli::server::core::downloader::DanmakuClient;
 use biliup_cli::server::core::plugin::{DownloadBase, DownloadPlugin, StreamInfoExt, StreamStatus};
 use biliup_cli::server::errors::{AppError, AppResult};
 use biliup_cli::server::infrastructure::connection_pool::ConnectionManager;
-use biliup_cli::server::infrastructure::context::{Context, PluginContext, Worker};
+use biliup_cli::server::infrastructure::context::{PluginContext, Worker};
 use biliup_cli::server::infrastructure::models::StreamerInfo;
 use biliup_cli::server::infrastructure::repositories;
 use biliup_cli::server::infrastructure::repositories::get_upload_config;
@@ -68,6 +68,7 @@ pub struct PyDownloader {
     url: String,
     remark: String,
     danmaku: Option<Arc<Py<PyAny>>>,
+
     cfg: OnceConfig,
 }
 
@@ -123,7 +124,7 @@ impl PyDownloader {
                                 self_obj.getattr("raw_stream_url")?.extract()?;
                             let title: String = self_obj.getattr("room_title")?.extract()?;
                             let live_cover_path: Option<String> =
-                                self_obj.getattr("live_cover_path")?.extract()?;
+                                self_obj.getattr("live_cover_url")?.extract()?;
                             let _is_download: bool = self_obj.getattr("is_download")?.extract()?;
                             let platform: String = self_obj.getattr("platform")?.extract()?;
 
